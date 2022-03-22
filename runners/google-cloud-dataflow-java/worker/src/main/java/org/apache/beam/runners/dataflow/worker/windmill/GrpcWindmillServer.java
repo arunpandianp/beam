@@ -936,7 +936,11 @@ public class GrpcWindmillServer extends WindmillServerStub {
               .execute(
                   () -> {
                     try {
-                      send(extension);
+                      synchronized (this) {
+                        if (!clientClosed.get()) {
+                          send(extension);
+                        }
+                      }
                     } catch (IllegalStateException e) {
                       // Stream was closed.
                     }
