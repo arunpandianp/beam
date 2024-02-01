@@ -163,6 +163,7 @@ public class DebugCapture {
                 .getConfig(project, region, job, request)
                 .execute();
         Config config = mapper.readValue(response.getConfig(), Config.class);
+        config.captureFrequencyUsec = 60 * 1000000;
         synchronized (lock) {
           captureConfig = config;
         }

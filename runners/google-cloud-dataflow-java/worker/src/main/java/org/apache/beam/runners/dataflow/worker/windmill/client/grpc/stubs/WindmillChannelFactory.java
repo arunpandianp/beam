@@ -17,13 +17,21 @@
  */
 package org.apache.beam.runners.dataflow.worker.windmill.client.grpc.stubs;
 
+import com.google.common.collect.ImmutableList;
 import java.net.Inet6Address;
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import javax.net.ssl.SSLException;
 import org.apache.beam.runners.dataflow.worker.windmill.WindmillServiceAddress;
+import org.apache.beam.vendor.grpc.v1p60p1.com.google.common.primitives.UnsignedInts;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.CallOptions;
 import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.Channel;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.ClientCall;
 import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.ManagedChannel;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.MethodDescriptor;
 import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.inprocess.InProcessChannelBuilder;
 import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.netty.GrpcSslContexts;
 import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.netty.NegotiationType;
@@ -63,16 +71,54 @@ public final class WindmillChannelFactory {
     }
   }
 
+
+  public static final class MultiChannel extends Channel {
+    private final ImmutableList<Channel> channels;
+    private final AtomicInteger pos = new AtomicInteger();
+
+    public MultiChannel(List<Channel> channels) {
+      this.channels = ImmutableList.copyOf(channels);
+    }
+
+    @Override
+    public <ReqT, RespT> ClientCall<ReqT, RespT> newCall(
+        MethodDescriptor<ReqT, RespT> m, CallOptions o) {
+      int idx = UnsignedInts.remainder(pos.getAndIncrement(), channels.size());
+      return channels.get(idx).newCall(m, o);
+    }
+
+    @Override
+    public String authority() {
+      return channels.get(0).authority();
+    }
+  }
+
+
   public static Channel remoteChannel(
       HostAndPort endpoint, int windmillServiceRpcChannelTimeoutSec) {
     try {
-      return createRemoteChannel(
-          NettyChannelBuilder.forAddress(endpoint.getHost(), endpoint.getPort()),
-          windmillServiceRpcChannelTimeoutSec);
+      List<Channel> channels = new ArrayList<>();
+      for (int i = 0; i< 5; ++i) {
+        channels.add(createRemoteChannel(
+            NettyChannelBuilder.forAddress(endpoint.getHost(), endpoint.getPort()),
+            windmillServiceRpcChannelTimeoutSec));
+      }
+      return new MultiChannel(channels);
     } catch (SSLException sslException) {
       throw new WindmillChannelCreationException(endpoint, sslException);
     }
   }
+  //
+  // public static Channel remoteChannel(
+  //     HostAndPort endpoint, int windmillServiceRpcChannelTimeoutSec) {
+  //   try {
+  //     return createRemoteChannel(
+  //         NettyChannelBuilder.forAddress(endpoint.getHost(), endpoint.getPort()),
+  //         windmillServiceRpcChannelTimeoutSec);
+  //   } catch (SSLException sslException) {
+  //     throw new WindmillChannelCreationException(endpoint, sslException);
+  //   }
+  // }
 
   public static Channel remoteChannel(
       Inet6Address directEndpoint, int port, int windmillServiceRpcChannelTimeoutSec) {
@@ -108,6 +154,7 @@ public final class WindmillChannelFactory {
     }
 
     return channelBuilder
+        .maxTraceEvents(100)
         .flowControlWindow(10 * 1024 * 1024)
         .maxInboundMessageSize(Integer.MAX_VALUE)
         .maxInboundMetadataSize(1024 * 1024)

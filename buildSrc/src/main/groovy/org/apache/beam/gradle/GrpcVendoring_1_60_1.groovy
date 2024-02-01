@@ -56,6 +56,8 @@ class GrpcVendoring_1_60_1 {
       "io.grpc:grpc-context:$grpc_version",
       "io.grpc:grpc-netty-shaded:$grpc_version",
       "io.grpc:grpc-protobuf:$grpc_version",
+      "io.grpc:grpc-services:$grpc_version",
+      "io.grpc:grpc-util:$grpc_version",
       "io.grpc:grpc-stub:$grpc_version",
       "io.grpc:grpc-alts:$grpc_version",
       "io.grpc:grpc-testing:$grpc_version",

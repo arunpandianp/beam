@@ -25,6 +25,22 @@ import com.google.api.services.dataflow.model.CounterUpdate;
 import com.google.api.services.dataflow.model.MapTask;
 import com.google.api.services.dataflow.model.PerStepNamespaceMetrics;
 import com.google.api.services.dataflow.model.PerWorkerMetrics;
+import java.util.Set;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.channelz.v1.Channel;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.channelz.v1.ChannelRef;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.channelz.v1.GetChannelRequest;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.channelz.v1.GetChannelResponse;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.channelz.v1.GetSocketRequest;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.channelz.v1.GetSocketResponse;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.channelz.v1.GetSubchannelRequest;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.channelz.v1.GetSubchannelResponse;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.channelz.v1.GetTopChannelsRequest;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.channelz.v1.GetTopChannelsResponse;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.channelz.v1.Socket;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.channelz.v1.SocketRef;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.channelz.v1.Subchannel;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.channelz.v1.SubchannelRef;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.protobuf.services.ChannelzService;
 import com.google.api.services.dataflow.model.Status;
 import com.google.api.services.dataflow.model.StreamingComputationConfig;
 import com.google.api.services.dataflow.model.StreamingConfigTask;
@@ -130,6 +146,7 @@ import org.apache.beam.sdk.util.Sleeper;
 import org.apache.beam.sdk.util.UserCodeException;
 import org.apache.beam.sdk.util.WindowedValue.WindowedValueCoder;
 import org.apache.beam.vendor.grpc.v1p60p1.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.stub.StreamObserver;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Splitter;
@@ -142,6 +159,7 @@ import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ListMu
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.MultimapBuilder;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.graph.MutableNetwork;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.net.HostAndPort;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.SettableFuture;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.Uninterruptibles;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -150,10 +168,12 @@ import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** Implements a Streaming Dataflow worker. */
+/**
+ * Implements a Streaming Dataflow worker.
+ */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
-  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
+    "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+    "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class StreamingDataflowWorker {
 
@@ -180,7 +200,9 @@ public class StreamingDataflowWorker {
   static final int MAX_SINK_BYTES = 10_000_000;
 
   private static final Logger LOG = LoggerFactory.getLogger(StreamingDataflowWorker.class);
-  /** The idGenerator to generate unique id globally. */
+  /**
+   * The idGenerator to generate unique id globally.
+   */
   private static final IdGenerator idGenerator = IdGenerators.decrementingLongs();
   /**
    * Fix up MapTask representation because MultiOutputInfos are missing from system generated
@@ -205,7 +227,9 @@ public class StreamingDataflowWorker {
   // Reserved ID for counter updates.
   // Matches kWindmillCounterUpdate in workflow_worker_service_multi_hubs.cc.
   private static final String WINDMILL_COUNTER_UPDATE_WORK_ID = "3";
-  /** Maximum number of failure stacktraces to report in each update sent to backend. */
+  /**
+   * Maximum number of failure stacktraces to report in each update sent to backend.
+   */
   private static final int MAX_FAILURES_TO_REPORT_IN_UPDATE = 1000;
 
   private static final Duration MAX_LOCAL_PROCESSING_RETRY_DURATION = Duration.standardMinutes(5);
@@ -231,7 +255,7 @@ public class StreamingDataflowWorker {
   private final BoundedQueueExecutor workUnitExecutor;
   private final WindmillServerStub windmillServer;
   private final Thread dispatchThread;
-  private final Thread commitThread;
+  private final List<Thread> commitThreads;
   private final AtomicLong activeCommitBytes = new AtomicLong();
   private final AtomicLong previousTimeAtMaxThreads = new AtomicLong();
   private final AtomicBoolean running = new AtomicBoolean();
@@ -408,22 +432,26 @@ public class StreamingDataflowWorker {
     dispatchThread.setDaemon(true);
     dispatchThread.setPriority(Thread.MIN_PRIORITY);
     dispatchThread.setName("DispatchThread");
-
-    commitThread =
-        new Thread(
-            new Runnable() {
-              @Override
-              public void run() {
-                if (windmillServiceEnabled) {
-                  streamingCommitLoop();
-                } else {
-                  commitLoop();
+    commitThreads = new ArrayList<>();
+    for (int i = 0; i< 5; i++) {
+      Thread commitThread =
+          new Thread(
+              new Runnable() {
+                @Override
+                public void run() {
+                  if (windmillServiceEnabled) {
+                    streamingCommitLoop();
+                  } else {
+                    commitLoop();
+                  }
                 }
-              }
-            });
-    commitThread.setDaemon(true);
-    commitThread.setPriority(Thread.MAX_PRIORITY);
-    commitThread.setName("CommitThread");
+              });
+      commitThread.setDaemon(true);
+      commitThread.setPriority(Thread.MAX_PRIORITY);
+      commitThread.setName("CommitThread " + i);
+
+      commitThreads.add(commitThread);
+    }
 
     this.publishCounters = publishCounters;
     this.windmillServer = options.getWindmillServerStub();
@@ -450,7 +478,9 @@ public class StreamingDataflowWorker {
     LOG.debug("maxWorkItemCommitBytes: {}", maxWorkItemCommitBytes);
   }
 
-  /** Returns whether an exception was caused by a {@link OutOfMemoryError}. */
+  /**
+   * Returns whether an exception was caused by a {@link OutOfMemoryError}.
+   */
   private static boolean isOutOfMemoryError(Throwable t) {
     while (t != null) {
       if (t instanceof OutOfMemoryError) {
@@ -523,7 +553,9 @@ public class StreamingDataflowWorker {
     Uninterruptibles.sleepUninterruptibly(millis, TimeUnit.MILLISECONDS);
   }
 
-  /** Sets the stage name and workId of the current Thread for logging. */
+  /**
+   * Sets the stage name and workId of the current Thread for logging.
+   */
   private static void setUpWorkLoggingContext(String workId, String computationId) {
     DataflowWorkerLoggingMDC.setWorkId(workId);
     DataflowWorkerLoggingMDC.setStageName(computationId);
@@ -585,7 +617,9 @@ public class StreamingDataflowWorker {
 
     memoryMonitorThread.start();
     dispatchThread.start();
-    commitThread.start();
+    for (Thread thread : commitThreads) {
+      thread.start();
+    }
     sampler.start();
 
     // Periodically report workers counters and other updates.
@@ -648,11 +682,11 @@ public class StreamingDataflowWorker {
                     new File(
                         options.getPeriodicStatusPageOutputDirectory(),
                         ("StreamingDataflowWorker"
-                                + options.getWorkerId()
-                                + "_"
-                                + page.pageName()
-                                + timestamp
-                                + ".html")
+                            + options.getWorkerId()
+                            + "_"
+                            + page.pageName()
+                            + timestamp
+                            + ".html")
                             .replaceAll("/", "_"));
                 writer = new PrintWriter(outputFile, UTF_8.name());
                 page.captureData(writer);
@@ -687,6 +721,7 @@ public class StreamingDataflowWorker {
         "exception", "Last Exception", new LastExceptionDataProvider());
     statusPages.addStatusDataProvider("cache", "State Cache", stateCache);
     statusPages.addStatusDataProvider("streaming", "Streaming Rpcs", windmillServer);
+    statusPages.addStatusDataProvider("grpc", "GRPC Channelz", new GrpcDataProvider());
 
     statusPages.start();
   }
@@ -719,8 +754,10 @@ public class StreamingDataflowWorker {
       dispatchThread.join();
       // We need to interrupt the commitThread in case it is blocking on pulling
       // from the commitQueue.
-      commitThread.interrupt();
-      commitThread.join();
+      for (Thread thread : commitThreads) {
+        thread.interrupt();
+        thread.join();
+      }
       memoryMonitor.stop();
       memoryMonitorThread.join();
       workUnitExecutor.shutdown();
@@ -1007,7 +1044,7 @@ public class StreamingDataflowWorker {
                     node ->
                         node instanceof ParallelInstructionNode
                             && ((ParallelInstructionNode) node).getParallelInstruction().getRead()
-                                != null);
+                            != null);
         InstructionOutputNode readOutputNode =
             (InstructionOutputNode) Iterables.getOnlyElement(mapTaskNetwork.successors(readNode));
         DataflowExecutionContext.DataflowExecutionStateTracker executionStateTracker =
@@ -1074,10 +1111,10 @@ public class StreamingDataflowWorker {
           readOperation.receivers[0].addOutputCounter(
               counterName,
               new OutputObjectAndByteCounter(
-                      new IntrinsicMapTaskExecutorFactory.ElementByteSizeObservableCoder<>(
-                          readCoder),
-                      mapTaskExecutor.getOutputCounters(),
-                      nameContext)
+                  new IntrinsicMapTaskExecutorFactory.ElementByteSizeObservableCoder<>(
+                      readCoder),
+                  mapTaskExecutor.getOutputCounters(),
+                  nameContext)
                   .setSamplingPeriod(100)
                   .countBytes(counterName));
         }
@@ -1753,7 +1790,9 @@ public class StreamingDataflowWorker {
     }
   }
 
-  /** Updates VM metrics like memory and CPU utilization. */
+  /**
+   * Updates VM metrics like memory and CPU utilization.
+   */
   private void updateVMMetrics() {
     Runtime rt = Runtime.getRuntime();
     long usedMemory = rt.totalMemory() - rt.freeMemory();
@@ -1861,7 +1900,9 @@ public class StreamingDataflowWorker {
     return key;
   }
 
-  /** Sends counter updates to Dataflow backend. */
+  /**
+   * Sends counter updates to Dataflow backend.
+   */
   private void sendWorkerUpdatesToDataflowService(
       CounterSet deltaCounters, CounterSet cumulativeCounters) throws IOException {
     // Throttle time is tracked by the windmillServer but is reported to DFE here.
@@ -1965,16 +2006,18 @@ public class StreamingDataflowWorker {
         }
       }
       ComputationState state = computationMap.get(computationHeartbeatResponse.getComputationId());
-      if (state != null) state.failWork(failedWork);
+      if (state != null) {
+        state.failWork(failedWork);
+      }
     }
   }
 
   /**
    * Sends a GetData request to Windmill for all sufficiently old active work.
    *
-   * <p>This informs Windmill that processing is ongoing and the work should not be retried. The age
-   * threshold is determined by {@link
-   * StreamingDataflowWorkerOptions#getActiveWorkRefreshPeriodMillis}.
+   * <p>This informs Windmill that processing is ongoing and the work should not be retried. The
+   * age threshold is determined by
+   * {@link StreamingDataflowWorkerOptions#getActiveWorkRefreshPeriodMillis}.
    */
   private void refreshActiveWork() {
     Map<String, List<Windmill.HeartbeatRequest>> heartbeats = new HashMap<>();
@@ -2005,6 +2048,216 @@ public class StreamingDataflowWorker {
     }
   }
 
+  private static class GrpcDataProvider implements StatusDataProvider {
+
+    private static final Logger LOG = LoggerFactory.getLogger(GrpcDataProvider.class);
+
+    ChannelzService channelzService = ChannelzService.newInstance(100);
+
+    static class VisitedSets {
+      Set<Long> channels = new HashSet<>();
+      Set<Long> subchannels = new HashSet<>();
+    }
+
+    <T> StreamObserver<T> getStreamObserver(SettableFuture<T> future) {
+      return new StreamObserver<T>() {
+        T response;
+
+        @Override
+        public void onNext(T message) {
+          response = message;
+        }
+
+        @Override
+        public void onError(Throwable throwable) {
+          future.setException(throwable);
+        }
+
+        @Override
+        public void onCompleted() {
+          future.set(response);
+        }
+      };
+    }
+    private void appendChannel(Channel channel, PrintWriter writer, VisitedSets visitedSets) {
+      writer.println("<table>");
+      writer.println("<tr>");
+      writer.println("<th><b>ChannelRef: " + channel.getRef());
+      writer.println("</b></th>");
+      writer.println("</tr>");
+      writer.println("<tr>");
+      writer.println("<td><pre>" + channel.toString());
+      writer.println("</pre></td>");
+      writer.println("</tr>");
+      for (ChannelRef childChannelRef : channel.getChannelRefList()) {
+        writer.println("<tr>");
+        writer.println("<td>");
+        writer.println("Child Channel");
+        writer.println("</td>");
+        writer.println("<td>");
+        appendChannel(childChannelRef, writer, visitedSets);
+        writer.println("</td>");
+        writer.println("</tr>");
+      }
+
+      for (SubchannelRef subchannelRef : channel.getSubchannelRefList()) {
+        writer.println("<tr>");
+        writer.println("<td>");
+        writer.println("Sub Channel");
+        writer.println("</td>");
+        writer.println("<td>");
+        appendSubchannel(subchannelRef, writer, visitedSets);
+        writer.println("</td>");
+        writer.println("</tr>");
+      }
+
+      for (SocketRef socketRef : channel.getSocketRefList()) {
+        writer.println("<tr>");
+        writer.println("<td>");
+        writer.println("Socket");
+        writer.println("</td>");
+        writer.println("<td>");
+        appendSocket(socketRef, writer);
+        writer.println("</td>");
+        writer.println("</tr>");
+      }
+      writer.println("</table>");
+    }
+
+    private void appendChannel(ChannelRef channelRef, PrintWriter writer, VisitedSets visitedSets) {
+      if (visitedSets.channels.contains(channelRef.getChannelId())) {
+        String msg = "Duplicate Channel Id: " + channelRef;
+        LOG.warn(msg);
+        writer.println(msg);
+        return;
+      }
+      SettableFuture<GetChannelResponse> future = SettableFuture.create();
+      channelzService.getChannel(
+          GetChannelRequest.newBuilder().setChannelId(channelRef.getChannelId()).build(),
+          getStreamObserver(future));
+      Channel channel;
+      try {
+        channel = future.get().getChannel();
+      } catch (Exception e) {
+        String msg = "Failed to get Channel: " + channelRef;
+        LOG.warn(msg, e);
+        writer.println(msg + " Exception: " + e.getMessage());
+        return;
+      }
+      appendChannel(channel, writer, visitedSets);
+    }
+
+    private void appendSubchannel(SubchannelRef subchannelRef, PrintWriter writer, VisitedSets visitedSets) {
+      if (visitedSets.subchannels.contains(subchannelRef.getSubchannelId())) {
+        String msg = "Duplicate Subchannel Id: " + subchannelRef;
+        LOG.warn(msg);
+        writer.println(msg);
+        return;
+      }
+      SettableFuture<GetSubchannelResponse> future = SettableFuture.create();
+      channelzService.getSubchannel(
+          GetSubchannelRequest.newBuilder().setSubchannelId(subchannelRef.getSubchannelId())
+              .build(),
+          getStreamObserver(future));
+      Subchannel subchannel;
+      try {
+        subchannel = future.get().getSubchannel();
+      } catch (Exception e) {
+        String msg = "Failed to get Subchannel: " + subchannelRef;
+        LOG.warn(msg, e);
+        writer.println(msg + " Exception: " + e.getMessage());
+        return;
+      }
+
+      writer.println("<table>");
+      writer.println("<tr>");
+      writer.println("<b>SubchannelId: </b>" + subchannelRef.getSubchannelId());
+      writer.println("<b>SubchannelName: </b>" + subchannelRef.getName());
+      writer.println("</tr>");
+      writer.println("<tr>");
+      writer.println("<td><pre>" + subchannel.toString());
+      writer.println("</pre></td>");
+      writer.println("</tr>");
+      for (ChannelRef channelRef1 : subchannel.getChannelRefList()) {
+        writer.println("<tr>");
+        writer.println("<td>");
+        writer.println("Channel");
+        writer.println("</td>");
+        writer.println("<td>");
+        appendChannel(channelRef1, writer, visitedSets);
+        writer.println("</td>");
+        writer.println("</tr>");
+      }
+
+      for (SubchannelRef subchannelRef1 : subchannel.getSubchannelRefList()) {
+        writer.println("<tr>");
+        writer.println("<td>");
+        writer.println("Sub Channel");
+        writer.println("</td>");
+        writer.println("<td>");
+        appendSubchannel(subchannelRef1, writer, visitedSets);
+        writer.println("</td>");
+        writer.println("</tr>");
+      }
+
+      for (SocketRef socketRef : subchannel.getSocketRefList()) {
+        writer.println("<tr>");
+        writer.println("<td>");
+        writer.println("Socket");
+        writer.println("</td>");
+        writer.println("<td>");
+        appendSocket(socketRef, writer);
+        writer.println("</td>");
+        writer.println("</tr>");
+      }
+      writer.println("</table>");
+    }
+
+    private void appendSocket(SocketRef socketRef, PrintWriter writer) {
+      SettableFuture<GetSocketResponse> future = SettableFuture.create();
+      channelzService.getSocket(
+          GetSocketRequest.newBuilder().setSocketId(socketRef.getSocketId())
+              .build(),
+          getStreamObserver(future));
+      Socket socket;
+      try {
+        socket = future.get().getSocket();
+      } catch (Exception e) {
+        String msg = "Failed to get Socket: " + socketRef;
+        LOG.warn(msg, e);
+        writer.println(msg + " Exception: " + e.getMessage());
+        return;
+      }
+      writer.println(socket);
+    }
+
+    @Override
+    public void appendSummaryHtml(PrintWriter writer) {
+      SettableFuture<GetTopChannelsResponse> future = SettableFuture.create();
+      channelzService.getTopChannels(
+          GetTopChannelsRequest.newBuilder()
+              .build(), getStreamObserver(future));
+      GetTopChannelsResponse message;
+      try {
+        message = future.get();
+      } catch (Exception e) {
+        String msg = "Failed to get GRPC channelz: " + e.getMessage();
+        LOG.warn(msg, e);
+        writer.println(msg);
+        return;
+      }
+      writer.println("Top Level Channels");
+      writer.println("<table>");
+      VisitedSets visitedSets = new VisitedSets();
+      for (Channel channel : message.getChannelList()) {
+        writer.println("<tr>");
+        appendChannel(channel, writer, visitedSets);
+        writer.println("</tr>");
+      }
+      writer.println("</table>");
+    }
+  }
+
   private class SpecsServlet extends BaseStatusServlet {
 
     public SpecsServlet() {
@@ -2025,6 +2278,7 @@ public class StreamingDataflowWorker {
   }
 
   private class MetricsDataProvider implements StatusDataProvider {
+
     @Override
     public void appendSummaryHtml(PrintWriter writer) {
       writer.println(workUnitExecutor.summaryHtml());
