@@ -71,54 +71,16 @@ public final class WindmillChannelFactory {
     }
   }
 
-
-  public static final class MultiChannel extends Channel {
-    private final ImmutableList<Channel> channels;
-    private final AtomicInteger pos = new AtomicInteger();
-
-    public MultiChannel(List<Channel> channels) {
-      this.channels = ImmutableList.copyOf(channels);
-    }
-
-    @Override
-    public <ReqT, RespT> ClientCall<ReqT, RespT> newCall(
-        MethodDescriptor<ReqT, RespT> m, CallOptions o) {
-      int idx = UnsignedInts.remainder(pos.getAndIncrement(), channels.size());
-      return channels.get(idx).newCall(m, o);
-    }
-
-    @Override
-    public String authority() {
-      return channels.get(0).authority();
-    }
-  }
-
-
-  public static Channel remoteChannel(
-      HostAndPort endpoint, int windmillServiceRpcChannelTimeoutSec) {
-    try {
-      List<Channel> channels = new ArrayList<>();
-      for (int i = 0; i< 5; ++i) {
-        channels.add(createRemoteChannel(
-            NettyChannelBuilder.forAddress(endpoint.getHost(), endpoint.getPort()),
-            windmillServiceRpcChannelTimeoutSec));
-      }
-      return new MultiChannel(channels);
-    } catch (SSLException sslException) {
-      throw new WindmillChannelCreationException(endpoint, sslException);
-    }
-  }
-  //
-  // public static Channel remoteChannel(
-  //     HostAndPort endpoint, int windmillServiceRpcChannelTimeoutSec) {
-  //   try {
-  //     return createRemoteChannel(
-  //         NettyChannelBuilder.forAddress(endpoint.getHost(), endpoint.getPort()),
-  //         windmillServiceRpcChannelTimeoutSec);
-  //   } catch (SSLException sslException) {
-  //     throw new WindmillChannelCreationException(endpoint, sslException);
-  //   }
-  // }
+   public static Channel remoteChannel(
+       HostAndPort endpoint, int windmillServiceRpcChannelTimeoutSec) {
+     try {
+       return createRemoteChannel(
+           NettyChannelBuilder.forAddress(endpoint.getHost(), endpoint.getPort()),
+           windmillServiceRpcChannelTimeoutSec);
+     } catch (SSLException sslException) {
+       throw new WindmillChannelCreationException(endpoint, sslException);
+     }
+   }
 
   public static Channel remoteChannel(
       Inet6Address directEndpoint, int port, int windmillServiceRpcChannelTimeoutSec) {
