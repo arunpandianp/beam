@@ -29,6 +29,7 @@ import java.util.IntSummaryStatistics;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
+import javax.annotation.concurrent.GuardedBy;
 import org.apache.beam.runners.core.NullSideInputReader;
 import org.apache.beam.runners.core.SideInputReader;
 import org.apache.beam.runners.core.StepContext;
@@ -253,10 +254,12 @@ public abstract class DataflowExecutionContext<T extends DataflowStepContext> {
      * Metadata on the message whose processing is currently being managed by this tracker. If no
      * message is actively being processed, activeMessageMetadata will be null.
      */
+    @GuardedBy("this")
     @Nullable private ActiveMessageMetadata activeMessageMetadata = null;
 
     private final MillisProvider clock = System::currentTimeMillis;
 
+    @GuardedBy("this")
     private final Map<String, IntSummaryStatistics> processingTimesByStep = new HashMap<>();
 
     public DataflowExecutionStateTracker(
@@ -313,18 +316,19 @@ public abstract class DataflowExecutionContext<T extends DataflowStepContext> {
       if (isDataflowProcessElementState) {
         DataflowExecutionState newDFState = (DataflowExecutionState) newState;
         if (newDFState.getStepName() != null && newDFState.getStepName().userName() != null) {
-          if (this.activeMessageMetadata != null) {
+          synchronized (this) {
             recordActiveMessageInProcessingTimesMap();
+            this.activeMessageMetadata =
+                ActiveMessageMetadata.create(newDFState.getStepName().userName(),
+                    clock.getMillis());
           }
-          this.activeMessageMetadata =
-              ActiveMessageMetadata.create(newDFState.getStepName().userName(), clock.getMillis());
         }
         elementExecutionTracker.enter(newDFState.getStepName());
       }
 
       return () -> {
         if (isDataflowProcessElementState) {
-          if (this.activeMessageMetadata != null) {
+          synchronized (this) {
             recordActiveMessageInProcessingTimesMap();
           }
           elementExecutionTracker.exit();
@@ -338,12 +342,21 @@ public abstract class DataflowExecutionContext<T extends DataflowStepContext> {
     }
 
     public Optional<ActiveMessageMetadata> getActiveMessageMetadata() {
-      return Optional.ofNullable(activeMessageMetadata);
+      synchronized (this) {
+        return Optional.ofNullable(activeMessageMetadata);
+      }
     }
 
     public Map<String, IntSummaryStatistics> getProcessingTimesByStepCopy() {
-      Map<String, IntSummaryStatistics> processingTimesCopy = processingTimesByStep;
-      return processingTimesCopy;
+      synchronized (this) {
+        Map<String, IntSummaryStatistics> processingTimesCopy = new HashMap<>();
+        for (Map.Entry<String, IntSummaryStatistics> entry : processingTimesByStep.entrySet()) {
+          IntSummaryStatistics copyVal = new IntSummaryStatistics();
+          copyVal.combine(entry.getValue());
+          processingTimesCopy.put(entry.getKey(), copyVal);
+        }
+        return processingTimesCopy;
+      }
     }
 
     /**
@@ -352,19 +365,21 @@ public abstract class DataflowExecutionContext<T extends DataflowStepContext> {
      * recorded.
      */
     private void recordActiveMessageInProcessingTimesMap() {
-      if (this.activeMessageMetadata == null) {
-        return;
+      synchronized (this) {
+        if (this.activeMessageMetadata == null) {
+          return;
+        }
+        this.processingTimesByStep.compute(
+            this.activeMessageMetadata.userStepName(),
+            (k, v) -> {
+              if (v == null) {
+                v = new IntSummaryStatistics();
+              }
+              v.accept((int) (System.currentTimeMillis() - this.activeMessageMetadata.startTime()));
+              return v;
+            });
+        this.activeMessageMetadata = null;
       }
-      this.processingTimesByStep.compute(
-          this.activeMessageMetadata.userStepName(),
-          (k, v) -> {
-            if (v == null) {
-              v = new IntSummaryStatistics();
-            }
-            v.accept((int) (System.currentTimeMillis() - this.activeMessageMetadata.startTime()));
-            return v;
-          });
-      this.activeMessageMetadata = null;
     }
   }
 }
