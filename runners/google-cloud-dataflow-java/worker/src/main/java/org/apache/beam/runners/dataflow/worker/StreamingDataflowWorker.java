@@ -103,7 +103,6 @@ import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.*;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.net.HostAndPort;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.Uninterruptibles;
-import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
@@ -331,36 +330,41 @@ public class StreamingDataflowWorker {
     GrpcWindmillStreamFactory.Builder windmillStreamFactoryBuilder =
         createWindmillStreamFactoryBuilder(options, clientId);
     GrpcDispatcherClient dispatcherClient = GrpcDispatcherClient.create(createStubFactory(options));
-
-    // If ComputationConfig.Fetcher is the Streaming Appliance implementation, WindmillServerStub
-    // can be created without a heartbeat response processor, as appliance does not send heartbeats.
-    Pair<ComputationConfig.Fetcher, Optional<WindmillServerStub>> configFetcherAndWindmillClient =
-        createConfigFetcherAndWindmillClient(
-            options,
-            dataflowServiceClient,
-            dispatcherClient,
-            maxWorkItemCommitBytes,
-            windmillStreamFactoryBuilder.build());
-
-    ComputationStateCache computationStateCache =
-        ComputationStateCache.create(
-            configFetcherAndWindmillClient.getLeft(),
-            workExecutor,
-            windmillStateCache::forComputation,
-            ID_GENERATOR);
-
-    GrpcWindmillStreamFactory windmillStreamFactory =
-        windmillStreamFactoryBuilder
-            .setProcessHeartbeatResponses(
-                new WorkHeartbeatResponseProcessor(computationStateCache::get))
-            .build();
-    // If WindmillServerStub is not present, it is a Streaming Engine job. We now have all the
-    // components created to initialize the GrpcWindmillServer.
-    WindmillServerStub windmillServer =
-        configFetcherAndWindmillClient
-            .getRight()
-            .orElseGet(
-                () -> GrpcWindmillServer.create(options, windmillStreamFactory, dispatcherClient));
+    ComputationConfig.Fetcher configFetcher;
+    ComputationStateCache computationStateCache;
+    WindmillServerStub windmillServer;
+    if (options.isEnableStreamingEngine()) {
+      configFetcher =
+          StreamingEngineComputationConfigFetcher.create(
+              options.getGlobalConfigRefreshPeriod().getMillis(),
+              dataflowServiceClient,
+              config ->
+                  onPipelineConfig(
+                      config,
+                      dispatcherClient::consumeWindmillDispatcherEndpoints,
+                      maxWorkItemCommitBytes));
+      computationStateCache =
+          ComputationStateCache.create(
+              configFetcher,
+              workExecutor,
+              windmillStateCache::forComputation,
+              ID_GENERATOR);
+      GrpcWindmillStreamFactory windmillStreamFactory =
+          windmillStreamFactoryBuilder
+              .setProcessHeartbeatResponses(
+                  new WorkHeartbeatResponseProcessor(computationStateCache::get))
+              .build();
+      windmillServer = GrpcWindmillServer.create(options, windmillStreamFactory, dispatcherClient);
+    } else {
+      windmillServer = createWindmillServerStubForAppliance(options, windmillStreamFactoryBuilder.build(), dispatcherClient);
+      configFetcher = new StreamingApplianceComputationConfigFetcher(windmillServer::getConfig);
+      computationStateCache =
+          ComputationStateCache.create(
+              configFetcher,
+              workExecutor,
+              windmillStateCache::forComputation,
+              ID_GENERATOR);
+    }
 
     FailureTracker failureTracker =
         options.isEnableStreamingEngine()
@@ -410,33 +414,6 @@ public class StreamingDataflowWorker {
         windmillStreamFactory,
         executorSupplier,
         stageInfo);
-  }
-
-  private static Pair<ComputationConfig.Fetcher, Optional<WindmillServerStub>>
-      createConfigFetcherAndWindmillClient(
-          DataflowWorkerHarnessOptions options,
-          WorkUnitClient dataflowServiceClient,
-          GrpcDispatcherClient dispatcherClient,
-          AtomicInteger maxWorkItemCommitBytes,
-          GrpcWindmillStreamFactory windmillStreamFactory) {
-    ComputationConfig.Fetcher configFetcher;
-    @Nullable WindmillServerStub windmillServer = null;
-    if (options.isEnableStreamingEngine()) {
-      configFetcher =
-          StreamingEngineComputationConfigFetcher.create(
-              options.getGlobalConfigRefreshPeriod().getMillis(),
-              dataflowServiceClient,
-              config ->
-                  onPipelineConfig(
-                      config,
-                      dispatcherClient::consumeWindmillDispatcherEndpoints,
-                      maxWorkItemCommitBytes));
-    } else {
-      windmillServer = createWindmillServerStub(options, windmillStreamFactory, dispatcherClient);
-      configFetcher = new StreamingApplianceComputationConfigFetcher(windmillServer::getConfig);
-    }
-
-    return Pair.of(configFetcher, Optional.ofNullable(windmillServer));
   }
 
   @VisibleForTesting
@@ -624,13 +601,14 @@ public class StreamingDataflowWorker {
     worker.start();
   }
 
-  private static WindmillServerStub createWindmillServerStub(
+  private static WindmillServerStub createWindmillServerStubForAppliance(
       DataflowWorkerHarnessOptions options,
       GrpcWindmillStreamFactory windmillStreamFactory,
       GrpcDispatcherClient dispatcherClient) {
     if (options.getWindmillServiceEndpoint() != null
-        || options.isEnableStreamingEngine()
+        || options.isEnableStreamingEngine() // This is unreachable
         || options.getLocalWindmillHostport().startsWith("grpc:")) {
+      // Don't we want this scheduleHealthChecks for SE?
       windmillStreamFactory.scheduleHealthChecks(
           options.getWindmillServiceStreamingRpcHealthCheckPeriodMs());
       return GrpcWindmillServer.create(options, windmillStreamFactory, dispatcherClient);
