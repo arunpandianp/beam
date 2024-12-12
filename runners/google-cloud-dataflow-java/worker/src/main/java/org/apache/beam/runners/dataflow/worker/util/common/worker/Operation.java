@@ -17,6 +17,8 @@
  */
 package org.apache.beam.runners.dataflow.worker.util.common.worker;
 
+import java.util.concurrent.CompletableFuture;
+
 /**
  * The abstract base class for Operations, which correspond to Instructions in the original MapTask
  * InstructionGraph.
@@ -113,6 +115,10 @@ public abstract class Operation {
   /** Returns true if this Operation has been aborted. */
   boolean isAborted() {
     return (initializationState == InitializationState.ABORTED);
+  }
+
+  public CompletableFuture<Void> startAsync() throws Exception {
+    return CompletableFuture.completedFuture(null);
   }
 
   /**

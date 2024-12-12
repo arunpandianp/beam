@@ -22,14 +22,19 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.concurrent.GuardedBy;
+import org.apache.beam.runners.dataflow.worker.windmill.work.processing.StreamingWorkScheduler;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.Monitor;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.Monitor.Guard;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** An executor for executing work on windmill items. */
 @SuppressWarnings({
   "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class BoundedQueueExecutor {
+  private static final Logger LOG = LoggerFactory.getLogger(BoundedQueueExecutor.class);
+
   private final ThreadPoolExecutor executor;
   private final long maximumBytesOutstanding;
 
@@ -223,7 +228,9 @@ public class BoundedQueueExecutor {
           () -> {
             try {
               work.run();
-            } finally {
+            } catch (RuntimeException e) {
+              LOG.error("uncaught exception in BoundedQueueExecutor", e);
+            }finally {
               decrementCounters(workBytes);
             }
           });

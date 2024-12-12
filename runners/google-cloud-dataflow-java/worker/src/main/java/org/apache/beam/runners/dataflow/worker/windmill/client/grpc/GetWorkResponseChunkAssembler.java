@@ -63,6 +63,7 @@ final class GetWorkResponseChunkAssembler {
    */
   Optional<AssembledWorkItem> append(Windmill.StreamingGetWorkResponseChunk chunk) {
     if (chunk.hasComputationMetadata()) {
+      LOG.trace("Response ComputationMetadata: {}", chunk.getComputationMetadata());
       metadata = ComputationMetadata.fromProto(chunk.getComputationMetadata());
     }
 
@@ -81,12 +82,15 @@ final class GetWorkResponseChunkAssembler {
    */
   private Optional<AssembledWorkItem> flushToWorkItem() {
     try {
-      return Optional.of(
+      WorkItem workItem = WorkItem.parseFrom(data.newInput());
+      LOG.trace("Response workItem: {}", workItem);
+      Optional<AssembledWorkItem> assembledWorkItem = Optional.of(
           AssembledWorkItem.create(
-              WorkItem.parseFrom(data.newInput()),
+              workItem,
               Preconditions.checkNotNull(metadata),
               workTimingInfosTracker.getLatencyAttributions(),
               bufferedSize));
+      return assembledWorkItem;
     } catch (IOException e) {
       LOG.error("Failed to parse work item from stream: ", e);
     } finally {

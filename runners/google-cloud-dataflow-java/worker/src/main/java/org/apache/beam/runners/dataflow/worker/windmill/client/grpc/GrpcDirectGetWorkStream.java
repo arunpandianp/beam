@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import javax.annotation.concurrent.GuardedBy;
 import net.jcip.annotations.ThreadSafe;
+import org.apache.beam.runners.dataflow.worker.WindmillTimeUtils;
 import org.apache.beam.runners.dataflow.worker.streaming.Watermarks;
 import org.apache.beam.runners.dataflow.worker.streaming.Work;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill;
@@ -46,6 +47,7 @@ import org.apache.beam.runners.dataflow.worker.windmill.work.refresh.HeartbeatSe
 import org.apache.beam.sdk.annotations.Internal;
 import org.apache.beam.sdk.util.BackOff;
 import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.stub.StreamObserver;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -163,7 +165,7 @@ final class GrpcDirectGetWorkStream
   private static Watermarks createWatermarks(
       WorkItem workItem, GetWorkResponseChunkAssembler.ComputationMetadata metadata) {
     return Watermarks.builder()
-        .setInputDataWatermark(metadata.inputDataWatermark())
+        .setInputDataWatermark(Preconditions.checkNotNull(WindmillTimeUtils.windmillToHarnessWatermark(workItem.getInputDataWatermark())))
         .setOutputDataWatermark(workItem.getOutputDataWatermark())
         .setSynchronizedProcessingTime(metadata.synchronizedProcessingTime())
         .build();

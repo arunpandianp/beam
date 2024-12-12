@@ -50,11 +50,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * {@link StreamingWorkerHarness} implementations that fetch {@link
- * org.apache.beam.runners.dataflow.worker.windmill.Windmill.WorkItem}(s) from a single source.
+ * {@link StreamingWorkerHarness} implementations that fetch
+ * {@link org.apache.beam.runners.dataflow.worker.windmill.Windmill.WorkItem}(s) from a single
+ * source.
  */
 @Internal
 public final class SingleSourceWorkerHarness implements StreamingWorkerHarness {
+
   private static final Logger LOG = LoggerFactory.getLogger(SingleSourceWorkerHarness.class);
   private static final int GET_WORK_STREAM_TIMEOUT_MINUTES = 3;
 
@@ -109,8 +111,14 @@ public final class SingleSourceWorkerHarness implements StreamingWorkerHarness {
     workCommitter.start();
     workProviderExecutor.execute(
         () -> {
-          getDispatchLoop().run();
-          LOG.info("Dispatch done");
+          while (!Thread.interrupted()) {
+            try {
+              getDispatchLoop().run();
+              LOG.info("Dispatch done");
+            } catch (RuntimeException e) {
+              LOG.error("Exception from Dispatch loop", e);
+            }
+          }
         });
   }
 
@@ -173,7 +181,9 @@ public final class SingleSourceWorkerHarness implements StreamingWorkerHarness {
                                 workItem,
                                 Watermarks.builder()
                                     .setInputDataWatermark(
-                                        Preconditions.checkNotNull(inputDataWatermark))
+                                        Preconditions.checkNotNull(
+                                            WindmillTimeUtils.windmillToHarnessWatermark(
+                                                workItem.getInputDataWatermark())))
                                     .setSynchronizedProcessingTime(synchronizedProcessingTime)
                                     .setOutputDataWatermark(workItem.getOutputDataWatermark())
                                     .build(),
@@ -237,7 +247,10 @@ public final class SingleSourceWorkerHarness implements StreamingWorkerHarness {
           streamingWorkScheduler.scheduleWork(
               computationState,
               workItem,
-              watermarks.setOutputDataWatermark(workItem.getOutputDataWatermark()).build(),
+              watermarks.setInputDataWatermark(Preconditions.checkNotNull(
+                      WindmillTimeUtils.windmillToHarnessWatermark(
+                          Preconditions.checkNotNull(workItem.getInputDataWatermark()))))
+                  .setOutputDataWatermark(workItem.getOutputDataWatermark()).build(),
               Work.createProcessingContext(
                   computationId, getDataClient, workCommitter::commit, heartbeatSender),
               /* getWorkStreamLatencies= */ Collections.emptyList());
@@ -248,6 +261,7 @@ public final class SingleSourceWorkerHarness implements StreamingWorkerHarness {
 
   @AutoBuilder
   public interface Builder {
+
     Builder setWorkCommitter(WorkCommitter workCommitter);
 
     Builder setGetDataClient(GetDataClient getDataClient);

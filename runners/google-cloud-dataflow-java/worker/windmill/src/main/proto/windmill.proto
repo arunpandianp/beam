@@ -445,6 +445,8 @@ message WorkItem {
   // elements mapped to a single key to impact pipeline performance. When
   // present, this field includes metadata associated with any hot key.
   optional HotKeyInfo hot_key_info = 11;
+
+  optional int64 input_data_watermark = 15 [default = -0x8000000000000000];
 }
 
 message ComputationWorkItems {
