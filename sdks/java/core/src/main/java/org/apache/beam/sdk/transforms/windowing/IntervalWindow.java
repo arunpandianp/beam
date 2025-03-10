@@ -17,11 +17,16 @@
  */
 package org.apache.beam.sdk.transforms.windowing;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.AbstractMap.SimpleEntry;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.DurationCoder;
@@ -38,6 +43,7 @@ import org.joda.time.ReadableDuration;
  * (inclusive) to {@link #end} (exclusive).
  */
 public class IntervalWindow extends BoundedWindow implements Comparable<IntervalWindow> {
+
   /** Start of the interval, inclusive. */
   private final Instant start;
 
@@ -145,6 +151,8 @@ public class IntervalWindow extends BoundedWindow implements Comparable<Interval
 
     private static final Coder<Instant> instantCoder = InstantCoder.of();
     private static final Coder<ReadableDuration> durationCoder = DurationCoder.of();
+    private static final AtomicReferenceArray<Map.Entry<IntervalWindow, byte[]>> CACHE =
+        new AtomicReferenceArray<>(1024);
 
     public static IntervalWindowCoder of() {
       return INSTANCE;
@@ -153,8 +161,19 @@ public class IntervalWindow extends BoundedWindow implements Comparable<Interval
     @Override
     public void encode(IntervalWindow window, OutputStream outStream)
         throws IOException, CoderException {
-      instantCoder.encode(window.end, outStream);
-      durationCoder.encode(new Duration(window.start, window.end), outStream);
+      int cacheIndex = Math.abs(window.hashCode()) % 1024;
+      Entry<IntervalWindow, byte[]> entry = CACHE.get(cacheIndex);
+      byte[] byteArray;
+      if (entry != null && window.equals(entry.getKey())) {
+        byteArray = entry.getValue();
+      } else {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream(128);
+        instantCoder.encode(window.end, bos);
+        durationCoder.encode(new Duration(window.start, window.end), bos);
+        byteArray = bos.toByteArray();
+        CACHE.set(cacheIndex, new SimpleEntry<>(window, byteArray));
+      }
+      outStream.write(byteArray);
     }
 
     @Override

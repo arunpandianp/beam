@@ -18,8 +18,12 @@
 package org.apache.beam.runners.core;
 
 import java.io.IOException;
+import java.util.AbstractMap.SimpleEntry;
 import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
@@ -29,6 +33,35 @@ import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Factory methods for creating the {@link StateNamespace StateNamespaces}. */
 public class StateNamespaces {
+
+  static class WindowCacheKey<W extends BoundedWindow> {
+    private final W window;
+    private final Coder<W> coder;
+    private final int hashCode;
+
+    WindowCacheKey(Coder<W> coder, W window) {
+      this.window = window;
+      this.coder = coder;
+      this.hashCode = Objects.hash(window, coder);
+    }
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      WindowCacheKey<?> that = (WindowCacheKey<?>) o;
+      return Objects.equals(window, that.window) && Objects.equals(coder, that.coder);
+    }
+
+    @Override
+    public int hashCode() {
+      return hashCode;
+    }
+  }
+
+  private static final AtomicReferenceArray<Map.Entry<WindowCacheKey<?>, String>> CACHE =
+      new AtomicReferenceArray<>(1024);
 
   private enum Namespace {
     GLOBAL,
@@ -106,7 +139,7 @@ public class StateNamespaces {
     public String stringKey() {
       try {
         // equivalent to String.format("/%s/", ...)
-        return "/" + CoderUtils.encodeToBase64(windowCoder, window) + "/";
+        return "/" + encodeToBase64(windowCoder, window) + "/";
       } catch (CoderException e) {
         throw new RuntimeException("Unable to generate string key from window " + window, e);
       }
@@ -114,7 +147,7 @@ public class StateNamespaces {
 
     @Override
     public void appendTo(Appendable sb) throws IOException {
-      sb.append('/').append(CoderUtils.encodeToBase64(windowCoder, window)).append('/');
+      sb.append('/').append(encodeToBase64(windowCoder, window)).append('/');
     }
 
     /** State in the same window will all be evicted together. */
@@ -179,7 +212,7 @@ public class StateNamespaces {
       try {
         // equivalent to String.format("/%s/%s/", ...)
         return "/"
-            + CoderUtils.encodeToBase64(windowCoder, window)
+            + encodeToBase64(windowCoder, window)
             +
             // Use base 36 so that can address 36 triggers in a single byte and still be human
             // readable.
@@ -193,7 +226,7 @@ public class StateNamespaces {
 
     @Override
     public void appendTo(Appendable sb) throws IOException {
-      sb.append('/').append(CoderUtils.encodeToBase64(windowCoder, window));
+      sb.append('/').append(encodeToBase64(windowCoder, window));
       sb.append('/').append(Integer.toString(triggerIndex, TRIGGER_RADIX).toUpperCase());
       sb.append('/');
     }
@@ -270,5 +303,18 @@ public class StateNamespaces {
     } catch (Exception e) {
       throw new RuntimeException("Invalid namespace string: '" + stringKey + "'", e);
     }
+  }
+
+  static <T extends BoundedWindow> String encodeToBase64(Coder<T> windowCoder, T window)
+      throws CoderException {
+    WindowCacheKey<T> windowCacheKey = new WindowCacheKey<T>(windowCoder, window);
+    int cacheIndex = Math.abs(windowCacheKey.hashCode()) % 1024;
+    Entry<WindowCacheKey<?>, String> entry = CACHE.get(cacheIndex);
+    if (entry != null && windowCacheKey.equals(entry.getKey())) {
+      return entry.getValue();
+    }
+    String encoded = CoderUtils.encodeToBase64(windowCoder, window);
+    CACHE.set(cacheIndex, new SimpleEntry<>(windowCacheKey, encoded));
+    return encoded;
   }
 }

@@ -47,7 +47,9 @@ import org.apache.beam.runners.dataflow.worker.streaming.sideinput.SideInputStat
 import org.apache.beam.runners.dataflow.worker.streaming.sideinput.SideInputStateFetcherFactory;
 import org.apache.beam.runners.dataflow.worker.util.BoundedQueueExecutor;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill;
+import org.apache.beam.runners.dataflow.worker.windmill.Windmill.InputMessageBundle;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill.LatencyAttribution;
+import org.apache.beam.runners.dataflow.worker.windmill.Windmill.Message;
 import org.apache.beam.runners.dataflow.worker.windmill.client.commits.Commit;
 import org.apache.beam.runners.dataflow.worker.windmill.state.WindmillStateCache;
 import org.apache.beam.runners.dataflow.worker.windmill.state.WindmillStateReader;
@@ -157,11 +159,13 @@ public class StreamingWorkScheduler {
   }
 
   private static long computeShuffleBytesRead(Windmill.WorkItem workItem) {
-    return workItem.getMessageBundlesList().stream()
-        .flatMap(bundle -> bundle.getMessagesList().stream())
-        .map(Windmill.Message::getSerializedSize)
-        .map(size -> (long) size)
-        .reduce(0L, Long::sum);
+    long acc = 0L;
+    for (InputMessageBundle bundle : workItem.getMessageBundlesList()) {
+      for (Message message : bundle.getMessagesList()) {
+        acc += message.getSerializedSize();
+      }
+    }
+    return acc;
   }
 
   private static Windmill.WorkItemCommitRequest.Builder initializeOutputBuilder(
@@ -343,6 +347,7 @@ public class StreamingWorkScheduler {
             .build()
             .getSerializedSize();
 
+    // can we nuke these?
     streamingCounters.windmillShuffleBytesRead().addValue(computeShuffleBytesRead(workItem));
     streamingCounters.windmillStateBytesRead().addValue(executeWorkResult.stateBytesRead());
     streamingCounters.windmillStateBytesWritten().addValue(stateBytesWritten);

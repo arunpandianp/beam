@@ -41,7 +41,6 @@ import org.apache.beam.runners.core.TimerInternals.TimerData;
 import org.apache.beam.runners.core.metrics.ExecutionStateSampler;
 import org.apache.beam.runners.core.metrics.ExecutionStateTracker;
 import org.apache.beam.runners.core.metrics.ExecutionStateTracker.ExecutionState;
-import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
 import org.apache.beam.runners.dataflow.worker.DataflowExecutionContext.DataflowStepContext;
 import org.apache.beam.runners.dataflow.worker.DataflowOperationContext.DataflowExecutionState;
 import org.apache.beam.runners.dataflow.worker.counters.CounterFactory;
@@ -56,7 +55,6 @@ import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Stopwatch;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Closer;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -265,7 +263,7 @@ public abstract class DataflowExecutionContext<T extends DataflowStepContext> {
     private final ContextActivationObserverRegistry contextActivationObserverRegistry;
     private final String workItemId;
 
-    private final boolean isStreaming;
+    // private final boolean isStreaming;
 
     /**
      * Metadata on the message whose processing is currently being managed by this tracker. If no
@@ -322,11 +320,11 @@ public abstract class DataflowExecutionContext<T extends DataflowStepContext> {
       this.contextActivationObserverRegistry = ContextActivationObserverRegistry.createDefault();
       this.clock = clock;
       DataflowWorkerLoggingInitializer.initialize();
-      if (options instanceof DataflowPipelineOptions) {
-        this.isStreaming = ((DataflowPipelineOptions) options).isStreaming();
-      } else {
-        this.isStreaming = false;
-      }
+      // if (options instanceof DataflowPipelineOptions) {
+      //   this.isStreaming = ((DataflowPipelineOptions) options).isStreaming();
+      // } else {
+      //   this.isStreaming = false;
+      // }
     }
 
     @Override
@@ -421,24 +419,24 @@ public abstract class DataflowExecutionContext<T extends DataflowStepContext> {
           newState.isProcessElementState && newState instanceof DataflowExecutionState;
       if (isDataflowProcessElementState) {
         DataflowExecutionState newDFState = (DataflowExecutionState) newState;
-        if (isStreaming) {
-          if (newDFState.getStepName() != null && newDFState.getStepName().userName() != null) {
-            recordActiveMessageInProcessingTimesMap();
-            synchronized (this) {
-              this.activeMessageMetadata =
-                  ActiveMessageMetadata.create(
-                      newDFState.getStepName().userName(), Stopwatch.createStarted());
-            }
-          }
-        }
+        // if (isStreaming) {
+        //   if (newDFState.getStepName() != null && newDFState.getStepName().userName() != null) {
+        //     recordActiveMessageInProcessingTimesMap();
+        //     synchronized (this) {
+        //       this.activeMessageMetadata =
+        //           ActiveMessageMetadata.create(
+        //               newDFState.getStepName().userName(), Stopwatch.createStarted());
+        //     }
+        //   }
+        // }
         elementExecutionTracker.enter(newDFState.getStepName());
       }
 
       return () -> {
         if (isDataflowProcessElementState) {
-          if (isStreaming) {
-            recordActiveMessageInProcessingTimesMap();
-          }
+          // if (isStreaming) {
+          //   recordActiveMessageInProcessingTimesMap();
+          // }
           elementExecutionTracker.exit();
         }
         baseCloseable.close();
@@ -472,21 +470,21 @@ public abstract class DataflowExecutionContext<T extends DataflowStepContext> {
      * processing times map. Sets the activeMessageMetadata to null after the entry has been
      * recorded.
      */
-    private synchronized void recordActiveMessageInProcessingTimesMap() {
-      if (this.activeMessageMetadata == null) {
-        return;
-      }
-      int processingTime = (int) (this.activeMessageMetadata.stopwatch().elapsed().toMillis());
-      this.processingTimesByStep.compute(
-          this.activeMessageMetadata.userStepName(),
-          (k, v) -> {
-            if (v == null) {
-              v = new IntSummaryStatistics();
-            }
-            v.accept(processingTime);
-            return v;
-          });
-      this.activeMessageMetadata = null;
-    }
+    // private synchronized void recordActiveMessageInProcessingTimesMap() {
+    //   if (this.activeMessageMetadata == null) {
+    //     return;
+    //   }
+    //   int processingTime = (int) (this.activeMessageMetadata.stopwatch().elapsed().toMillis());
+    //   this.processingTimesByStep.compute(
+    //       this.activeMessageMetadata.userStepName(),
+    //       (k, v) -> {
+    //         if (v == null) {
+    //           v = new IntSummaryStatistics();
+    //         }
+    //         v.accept(processingTime);
+    //         return v;
+    //       });
+    //   this.activeMessageMetadata = null;
+    // }
   }
 }
