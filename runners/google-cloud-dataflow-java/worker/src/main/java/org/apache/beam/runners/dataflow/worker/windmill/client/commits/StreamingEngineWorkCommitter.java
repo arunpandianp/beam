@@ -110,7 +110,7 @@ public final class StreamingEngineWorkCommitter implements WorkCommitter {
       }
       failCommit(commit);
     } else {
-      commitQueue.put(commit);
+      commitQueue.lazyPut(commit);
     }
   }
 

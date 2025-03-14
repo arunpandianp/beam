@@ -881,7 +881,7 @@ message StreamingCommitRequestChunk {
   // parse of serialized bytes to generate the complete WorkItemCommitRequest
   // before handing off to the WindmillHost for processing.
   optional int64 remaining_bytes_for_work_item = 4;
-  optional bytes serialized_work_item_commit = 5;
+  optional WorkItemCommitRequest serialized_work_item_commit = 5;
 }
 
 message StreamingCommitResponse {

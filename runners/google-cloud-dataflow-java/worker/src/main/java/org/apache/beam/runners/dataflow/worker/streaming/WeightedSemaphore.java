@@ -32,7 +32,7 @@ public final class WeightedSemaphore<V> {
   }
 
   public static <V> WeightedSemaphore<V> create(int maxWeight, Function<V, Integer> weigherFn) {
-    return new WeightedSemaphore<>(maxWeight, new Semaphore(maxWeight, true), weigherFn);
+    return new WeightedSemaphore<>(maxWeight, new Semaphore(maxWeight, false), weigherFn);
   }
 
   public void acquireUninterruptibly(V value) {

@@ -17,8 +17,6 @@
  */
 package org.apache.beam.runners.dataflow.worker.windmill.client.grpc;
 
-import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
-
 import com.google.auto.value.AutoValue;
 import java.io.PrintWriter;
 import java.util.HashMap;
@@ -44,7 +42,6 @@ import org.apache.beam.runners.dataflow.worker.windmill.client.WindmillStreamShu
 import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.observers.StreamObserverFactory;
 import org.apache.beam.runners.dataflow.worker.windmill.client.throttling.ThrottleTimer;
 import org.apache.beam.sdk.util.BackOff;
-import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
 import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.EvictingQueue;
@@ -223,7 +220,9 @@ final class GrpcCommitWorkStream
       Map.Entry<Long, PendingRequest> elem = requests.entrySet().iterator().next();
       if (elem.getValue().request().getSerializedSize()
           > AbstractWindmillStream.RPC_STREAM_CHUNK_SIZE) {
-        issueMultiChunkRequest(elem.getKey(), elem.getValue());
+        throw new RuntimeException("issueMultiChunkRequest");
+
+        // issueMultiChunkRequest(elem.getKey(), elem.getValue());
       } else {
         issueSingleRequest(elem.getKey(), elem.getValue());
       }
@@ -240,7 +239,8 @@ final class GrpcCommitWorkStream
         .setComputationId(pendingRequest.computationId())
         .setRequestId(id)
         .setShardingKey(pendingRequest.shardingKey())
-        .setSerializedWorkItemCommit(pendingRequest.serializedCommit());
+        .setSerializedWorkItemCommit(pendingRequest.request());
+    // .setSerializedWorkItemCommit(pendingRequest.serializedCommit());
     StreamingCommitWorkRequest chunk = requestBuilder.build();
     synchronized (this) {
       if (!prepareForSend(id, pendingRequest)) {
@@ -265,7 +265,8 @@ final class GrpcCommitWorkStream
       chunkBuilder
           .setRequestId(entry.getKey())
           .setShardingKey(request.shardingKey())
-          .setSerializedWorkItemCommit(request.serializedCommit());
+          .setSerializedWorkItemCommit(request.request());
+      // .setSerializedWorkItemCommit(request.serializedCommit());
     }
     StreamingCommitWorkRequest request = requestBuilder.build();
     synchronized (this) {
@@ -277,41 +278,44 @@ final class GrpcCommitWorkStream
     }
   }
 
-  private void issueMultiChunkRequest(long id, PendingRequest pendingRequest)
-      throws WindmillStreamShutdownException {
-    checkNotNull(pendingRequest.computationId(), "Cannot commit WorkItem w/o a computationId.");
-    ByteString serializedCommit = pendingRequest.serializedCommit();
-    synchronized (this) {
-      if (!prepareForSend(id, pendingRequest)) {
-        pendingRequest.abort();
-        return;
-      }
-
-      for (int i = 0;
-          i < serializedCommit.size();
-          i += AbstractWindmillStream.RPC_STREAM_CHUNK_SIZE) {
-        int end = i + AbstractWindmillStream.RPC_STREAM_CHUNK_SIZE;
-        ByteString chunk = serializedCommit.substring(i, Math.min(end, serializedCommit.size()));
-        StreamingCommitRequestChunk.Builder chunkBuilder =
-            StreamingCommitRequestChunk.newBuilder()
-                .setRequestId(id)
-                .setSerializedWorkItemCommit(chunk)
-                .setComputationId(pendingRequest.computationId())
-                .setShardingKey(pendingRequest.shardingKey());
-        int remaining = serializedCommit.size() - end;
-        if (remaining > 0) {
-          chunkBuilder.setRemainingBytesForWorkItem(remaining);
-        }
-        StreamingCommitWorkRequest requestChunk =
-            StreamingCommitWorkRequest.newBuilder().addCommitChunk(chunkBuilder).build();
-
-        if (!trySend(requestChunk)) {
-          // The stream broke, don't try to send the rest of the chunks here.
-          break;
-        }
-      }
-    }
-  }
+  // private void issueMultiChunkRequest(long id, PendingRequest pendingRequest)
+  //     throws WindmillStreamShutdownException {
+  //   throw new RuntimeException("issueMultiChunkRequest");
+  //   // checkNotNull(pendingRequest.computationId(), "Cannot commit WorkItem w/o a
+  // computationId.");
+  //   // ByteString serializedCommit = pendingRequest.serializedCommit();
+  //   // synchronized (this) {
+  //   //   if (!prepareForSend(id, pendingRequest)) {
+  //   //     pendingRequest.abort();
+  //   //     return;
+  //   //   }
+  //   //
+  //   //   for (int i = 0;
+  //   //       i < serializedCommit.size();
+  //   //       i += AbstractWindmillStream.RPC_STREAM_CHUNK_SIZE) {
+  //   //     int end = i + AbstractWindmillStream.RPC_STREAM_CHUNK_SIZE;
+  //   //     ByteString chunk = serializedCommit.substring(i, Math.min(end,
+  // serializedCommit.size()));
+  //   //     StreamingCommitRequestChunk.Builder chunkBuilder =
+  //   //         StreamingCommitRequestChunk.newBuilder()
+  //   //             .setRequestId(id)
+  //   //             .setSerializedWorkItemCommit(chunk)
+  //   //             .setComputationId(pendingRequest.computationId())
+  //   //             .setShardingKey(pendingRequest.shardingKey());
+  //   //     int remaining = serializedCommit.size() - end;
+  //   //     if (remaining > 0) {
+  //   //       chunkBuilder.setRemainingBytesForWorkItem(remaining);
+  //   //     }
+  //   //     StreamingCommitWorkRequest requestChunk =
+  //   //         StreamingCommitWorkRequest.newBuilder().addCommitChunk(chunkBuilder).build();
+  //   //
+  //   //     if (!trySend(requestChunk)) {
+  //   //       // The stream broke, don't try to send the rest of the chunks here.
+  //   //       break;
+  //   //     }
+  //   //   }
+  //   // }
+  // }
 
   /** Returns true if prepare for send succeeded. */
   private synchronized boolean prepareForSend(long id, PendingRequest request) {
@@ -349,9 +353,9 @@ final class GrpcCommitWorkStream
       return (long) request().getSerializedSize() + computationId().length();
     }
 
-    private ByteString serializedCommit() {
-      return request().toByteString();
-    }
+    // private ByteString serializedCommit() {
+    //   return request().toByteString();
+    // }
 
     private void completeWithStatus(CommitStatus commitStatus) {
       onDone().accept(commitStatus);

@@ -272,8 +272,8 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     return activeWindows.getActiveAndNewWindows().isEmpty();
   }
 
-  private Set<W> windowsThatAreOpen(Collection<W> windows) {
-    Set<W> result = new HashSet<>();
+  private List<W> windowsThatAreOpen(HashSet<W> windows) {
+    List<W> result = new ArrayList<>(windows.size());
     for (W window : windows) {
       ReduceFn<K, InputT, OutputT, W>.Context directContext =
           contextFactory.base(window, StateStyle.DIRECT);
@@ -284,7 +284,7 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     return result;
   }
 
-  private Collection<W> windowsThatShouldFire(Set<W> windows) throws Exception {
+  private Collection<W> windowsThatShouldFire(List<W> windows) throws Exception {
     Collection<W> result = new ArrayList<>();
     // Filter out timers that didn't trigger.
     for (W window : windows) {
@@ -328,7 +328,7 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     }
 
     // Determine all the windows for elements.
-    Set<W> windows = collectWindows(values);
+    HashSet<W> windows = collectWindows(values);
     // If an incoming element introduces a new window, attempt to merge it into an existing
     // window eagerly.
     Map<W, W> windowToMergeResult = mergeWindows(windows);
@@ -347,7 +347,7 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     prefetchWindowsForValues(windows);
 
     // All windows that are open before element processing may need to fire.
-    Set<W> windowsToConsider = windowsThatAreOpen(windows);
+    List<W> windowsToConsider = windowsThatAreOpen(windows);
     // Prefetch state necessary to determine if the triggers should fire. This is done before
     // user processing so it may fetch with user desired state.
     for (W mergedWindow : windowsToConsider) {
@@ -386,8 +386,8 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
   }
 
   /** Extract the windows associated with the values. */
-  private Set<W> collectWindows(Iterable<WindowedValue<InputT>> values) throws Exception {
-    Set<W> windows = new HashSet<>();
+  private HashSet<W> collectWindows(Iterable<WindowedValue<InputT>> values) throws Exception {
+    HashSet<W> windows = new HashSet<>();
     for (WindowedValue<?> value : values) {
       for (BoundedWindow untypedWindow : value.getWindows()) {
         @SuppressWarnings("unchecked")

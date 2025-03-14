@@ -50,15 +50,19 @@ public class IntervalWindow extends BoundedWindow implements Comparable<Interval
   /** End of the interval, exclusive. */
   private final Instant end;
 
+  private final int hashCode;
+
   /** Creates a new IntervalWindow that represents the half-open time interval [start, end). */
   public IntervalWindow(Instant start, Instant end) {
     this.start = start;
     this.end = end;
+    this.hashCode = hashCodeInternal(start, end);
   }
 
   public IntervalWindow(Instant start, ReadableDuration size) {
     this.start = start;
     this.end = start.plus(size);
+    this.hashCode = hashCodeInternal(start, end);
   }
 
   /** Returns the start of this window, inclusive. */
@@ -109,6 +113,10 @@ public class IntervalWindow extends BoundedWindow implements Comparable<Interval
 
   @Override
   public int hashCode() {
+    return hashCode;
+  }
+
+  private static int hashCodeInternal(Instant start, Instant end) {
     // The end values are themselves likely to be arithmetic sequence, which
     // is a poor distribution to use for a hashtable, so we
     // add a highly non-linear transformation.
@@ -116,7 +124,7 @@ public class IntervalWindow extends BoundedWindow implements Comparable<Interval
   }
 
   /** Compute the inverse of (odd) x mod 2^32. */
-  private int modInverse(int x) {
+  private static int modInverse(int x) {
     // Cube gives inverse mod 2^4, as x^4 == 1 (mod 2^4) for all odd x.
     int inverse = x * x * x;
     // Newton iteration doubles correct bits at each step.

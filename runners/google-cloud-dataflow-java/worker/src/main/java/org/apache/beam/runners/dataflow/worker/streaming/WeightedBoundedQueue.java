@@ -17,25 +17,55 @@
  */
 package org.apache.beam.runners.dataflow.worker.streaming;
 
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.ArrayList;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Queue bounded by a {@link WeightedSemaphore}. */
-public final class WeightedBoundedQueue<V> {
+public final class WeightedBoundedQueue<V extends @NonNull Object> {
 
-  private final LinkedBlockingQueue<V> queue;
+  private final LinkedBlockingDeque<V> queue;
   private final WeightedSemaphore<V> weightedSemaphore;
+  private final ConcurrentLinkedQueue<V> putQueue = new ConcurrentLinkedQueue<>();
+  private final Object putQueueDrainLock = new Object();
+  private final AtomicBoolean isPutBatchPending = new AtomicBoolean(false);
 
   private WeightedBoundedQueue(
-      LinkedBlockingQueue<V> linkedBlockingQueue, WeightedSemaphore<V> weightedSemaphore) {
+      LinkedBlockingDeque<V> linkedBlockingQueue, WeightedSemaphore<V> weightedSemaphore) {
     this.queue = linkedBlockingQueue;
     this.weightedSemaphore = weightedSemaphore;
   }
 
-  public static <V> WeightedBoundedQueue<V> create(WeightedSemaphore<V> weightedSemaphore) {
-    return new WeightedBoundedQueue<>(new LinkedBlockingQueue<>(), weightedSemaphore);
+  public static <V extends @NonNull Object> WeightedBoundedQueue<V> create(
+      WeightedSemaphore<V> weightedSemaphore) {
+    return new WeightedBoundedQueue<>(new LinkedBlockingDeque<>(), weightedSemaphore);
+  }
+
+  public void lazyPut(V value) {
+    weightedSemaphore.acquireUninterruptibly(value);
+    putQueue.add(value);
+    boolean submittedToExistingBatch = isPutBatchPending.getAndSet(true);
+    if (submittedToExistingBatch) {
+      // There is already a thread about to drain the put queue
+      // Current thread does not need to drain.
+      return;
+    }
+    synchronized (putQueueDrainLock) {
+      isPutBatchPending.set(false);
+      ArrayList<V> localCopy = new ArrayList<>();
+      while (true) {
+        V polledValue = putQueue.poll();
+        if (polledValue == null) break;
+        localCopy.add(polledValue);
+      }
+      // deque addAll is specialized
+      queue.addAll(localCopy);
+    }
   }
 
   /**
