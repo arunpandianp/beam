@@ -159,8 +159,8 @@ public class IntervalWindow extends BoundedWindow implements Comparable<Interval
 
     private static final Coder<Instant> instantCoder = InstantCoder.of();
     private static final Coder<ReadableDuration> durationCoder = DurationCoder.of();
-    private static final AtomicReferenceArray<Map.Entry<IntervalWindow, byte[]>> CACHE =
-        new AtomicReferenceArray<>(1024);
+    // private static final AtomicReferenceArray<Map.Entry<IntervalWindow, byte[]>> CACHE =
+    //     new AtomicReferenceArray<>(1024);
 
     public static IntervalWindowCoder of() {
       return INSTANCE;
@@ -169,18 +169,18 @@ public class IntervalWindow extends BoundedWindow implements Comparable<Interval
     @Override
     public void encode(IntervalWindow window, OutputStream outStream)
         throws IOException, CoderException {
-      int cacheIndex = Math.abs(window.hashCode()) % 1024;
-      Entry<IntervalWindow, byte[]> entry = CACHE.get(cacheIndex);
+      // int cacheIndex = Math.abs(window.hashCode()) % 1024;
+      // Entry<IntervalWindow, byte[]> entry = CACHE.get(cacheIndex);
       byte[] byteArray;
-      if (entry != null && window.equals(entry.getKey())) {
-        byteArray = entry.getValue();
-      } else {
+      // if (entry != null && window.equals(entry.getKey())) {
+      //   byteArray = entry.getValue();
+      // } else {
         ByteArrayOutputStream bos = new ByteArrayOutputStream(128);
         instantCoder.encode(window.end, bos);
         durationCoder.encode(new Duration(window.start, window.end), bos);
         byteArray = bos.toByteArray();
-        CACHE.set(cacheIndex, new SimpleEntry<>(window, byteArray));
-      }
+        // CACHE.set(cacheIndex, new SimpleEntry<>(window, byteArray));
+      // }
       outStream.write(byteArray);
     }
 

@@ -124,7 +124,7 @@ public class WindmillBag<T> extends SimpleWindmillState implements BagState<T> {
   @Override
   public Iterable<T> read() {
     return Iterables.concat(
-        fetchData(getFuture()), localAdditions);
+        fetchData(getFuture()), Iterables.limit(localAdditions, localAdditions.size()));
   }
 
   @Override
@@ -153,6 +153,7 @@ public class WindmillBag<T> extends SimpleWindmillState implements BagState<T> {
       throws IOException {
     Windmill.WorkItemCommitRequest.Builder commitBuilder =
         Windmill.WorkItemCommitRequest.newBuilder();
+
     Windmill.TagBag.Builder bagUpdatesBuilder = null;
 
     if (cleared) {
@@ -176,7 +177,7 @@ public class WindmillBag<T> extends SimpleWindmillState implements BagState<T> {
           // Capture the value's size now since we have it.
           encodedSize += encoded.size();
         }
-        bagUpdatesBuilder.setValues().addValues(encoded);
+        bagUpdatesBuilder.addValues(encoded);
       }
     }
 

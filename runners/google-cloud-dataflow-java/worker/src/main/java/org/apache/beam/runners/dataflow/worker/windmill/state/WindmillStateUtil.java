@@ -38,11 +38,11 @@ class WindmillStateUtil {
   static ByteString encodeKey(StateNamespace namespace, StateTag<?> address) {
     SimpleEntry<String, String> cacheKey =
         new SimpleEntry<>(namespace.stringKey(), address.getId());
-    int cacheIndex = Math.abs(cacheKey.hashCode()) % 1024;
-    Entry<Entry<String, String>, ByteString> entry = CACHE.get(cacheIndex);
-    if (entry != null && cacheKey.equals(entry.getKey())) {
-      return entry.getValue();
-    }
+    // int cacheIndex = Math.abs(cacheKey.hashCode()) % 1024;
+    // Entry<Entry<String, String>, ByteString> entry = CACHE.get(cacheIndex);
+    // if (entry != null && cacheKey.equals(entry.getKey())) {
+    //   return entry.getValue();
+    // }
     try {
       // Use ByteStringOutputStream rather than concatenation and String.format. We build these keys
       // a lot, and this leads to better performance results. See associated benchmarks.
@@ -54,7 +54,7 @@ class WindmillStateUtil {
       stream.append('+');
       address.appendTo(stream);
       ByteString byteString = stream.toByteString();
-      CACHE.set(cacheIndex, new SimpleEntry<>(cacheKey, byteString));
+      // CACHE.set(cacheIndex, new SimpleEntry<>(cacheKey, byteString));
       return byteString;
     } catch (IOException e) {
       throw new RuntimeException(e);
