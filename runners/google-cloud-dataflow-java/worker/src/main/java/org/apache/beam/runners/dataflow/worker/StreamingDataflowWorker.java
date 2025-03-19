@@ -331,7 +331,11 @@ public final class StreamingDataflowWorker {
                 .build();
         getWorkSender =
             GetWorkSender.forStreamingEngine(
-                receiver -> windmillServer.getWorkStream(request, receiver));
+                (computation) ->
+                    receiver ->
+                        windmillServer.getWorkStream(
+                            request.toBuilder().addComputationIdFilter(computation).build(),
+                            receiver));
       } else {
         getDataClient = new ApplianceGetDataClient(windmillServer, getDataMetricTracker);
         heartbeatSender = new ApplianceHeartbeatSender(windmillServer::getData);
@@ -949,6 +953,7 @@ public final class StreamingDataflowWorker {
 
   @FunctionalInterface
   private interface StreamingWorkerStatusReporterFactory {
+
     StreamingWorkerStatusReporter createStatusReporter(ThrottledTimeTracker throttledTimeTracker);
   }
 
@@ -972,6 +977,7 @@ public final class StreamingDataflowWorker {
 
     @AutoValue.Builder
     abstract static class Builder {
+
       abstract Builder setConfigFetcher(ComputationConfig.Fetcher value);
 
       abstract Builder setComputationStateCache(ComputationStateCache value);

@@ -84,9 +84,9 @@ import org.joda.time.Instant;
  * @param <W> The type of windows this operates on.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
-  "nullness",
-  "keyfor"
+    "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+    "nullness",
+    "keyfor"
 }) // TODO(https://github.com/apache/beam/issues/20497)
 public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
 
@@ -385,7 +385,9 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     activeWindows.persist();
   }
 
-  /** Extract the windows associated with the values. */
+  /**
+   * Extract the windows associated with the values.
+   */
   private HashSet<W> collectWindows(Iterable<WindowedValue<InputT>> values) throws Exception {
     HashSet<W> windows = new HashSet<>();
     for (WindowedValue<?> value : values) {
@@ -443,6 +445,7 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
   }
 
   private class OnMergeCallback implements ActiveWindowSet.MergeCallback<W> {
+
     private final Map<W, W> windowToMergeResult;
 
     OnMergeCallback(Map<W, W> windowToMergeResult) {
@@ -464,9 +467,9 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     }
 
     /**
-     * Called from the active window set to indicate {@code toBeMerged} (of which only {@code
-     * activeToBeMerged} are ACTIVE and thus have state associated with them) will later be merged
-     * into {@code mergeResult}.
+     * Called from the active window set to indicate {@code toBeMerged} (of which only
+     * {@code activeToBeMerged} are ACTIVE and thus have state associated with them) will later be
+     * merged into {@code mergeResult}.
      */
     @Override
     public void prefetchOnMerge(Collection<W> toBeMerged, W mergeResult) throws Exception {
@@ -484,9 +487,9 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     }
 
     /**
-     * Called from the active window set to indicate {@code toBeMerged} (of which only {@code
-     * activeToBeMerged} are ACTIVE and thus have state associated with them) are about to be merged
-     * into {@code mergeResult}.
+     * Called from the active window set to indicate {@code toBeMerged} (of which only
+     * {@code activeToBeMerged} are ACTIVE and thus have state associated with them) are about to be
+     * merged into {@code mergeResult}.
      */
     @Override
     public void onMerge(Collection<W> toBeMerged, W mergeResult) throws Exception {
@@ -545,16 +548,15 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
    */
   private ImmutableSet<W> toMergedWindows(
       final Map<W, W> windowToMergeResult, final Collection<? extends BoundedWindow> windows) {
-    return ImmutableSet.copyOf(
-        FluentIterable.from(windows)
-            .transform(
-                untypedWindow -> {
-                  @SuppressWarnings("unchecked")
-                  W window = (W) untypedWindow;
-                  W mergedWindow = windowToMergeResult.get(window);
-                  // If the element is not present in the map, the window is unmerged.
-                  return (mergedWindow == null) ? window : mergedWindow;
-                }));
+    ImmutableSet.Builder<W> builder = ImmutableSet.builder();
+    for (BoundedWindow untypedWindow : windows) {
+      @SuppressWarnings("unchecked")
+      W window = (W) untypedWindow;
+      W mergedWindow = windowToMergeResult.get(window);
+      // If the element is not present in the map, the window is unmerged.
+      builder.add((mergedWindow == null) ? window : mergedWindow);
+    }
+    return builder.build();
   }
 
   private void prefetchWindowsForValues(Collection<W> windows) {
@@ -569,8 +571,8 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
   /**
    * Process an element.
    *
-   * @param windowToMergeResult map of windows to merged windows. If a window is not present it is
-   *     unmerged.
+   * @param windowToMergeResult map of windows to merged windows. If a window is not present it
+   *     is unmerged.
    * @param value the value being processed
    */
   private void processElement(Map<W, W> windowToMergeResult, WindowedValue<InputT> value)
@@ -626,8 +628,11 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     }
   }
 
-  /** A descriptor of the activation for a window based on a timer. */
+  /**
+   * A descriptor of the activation for a window based on a timer.
+   */
   private class WindowActivation {
+
     public final ReduceFn<K, InputT, OutputT, W>.Context directContext;
     public final ReduceFn<K, InputT, OutputT, W>.Context renamedContext;
     // If this is an end-of-window timer then we may need to set a garbage collection timer
@@ -789,7 +794,7 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
             timerInternals.currentOutputWatermarkTime());
         if (windowActivation.windowIsActiveAndOpen()
             && triggerRunner.shouldFire(
-                directContext.window(), directContext.timers(), directContext.state())) {
+            directContext.window(), directContext.timers(), directContext.state())) {
           emit(directContext, renamedContext);
         }
 
@@ -889,7 +894,9 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     triggerRunner.clearFinished(directContext.state());
   }
 
-  /** Should the reduce function state be cleared? */
+  /**
+   * Should the reduce function state be cleared?
+   */
   private boolean shouldDiscardAfterFiring(boolean isFinished) {
     if (isFinished) {
       // This is the last firing for trigger.
@@ -910,7 +917,9 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     prefetchOnTrigger(directContext, renamedContext);
   }
 
-  /** Emit if a trigger is ready to fire or timers require it, and cleanup state. */
+  /**
+   * Emit if a trigger is ready to fire or timers require it, and cleanup state.
+   */
   private void emit(
       ReduceFn<K, InputT, OutputT, W>.Context directContext,
       ReduceFn<K, InputT, OutputT, W>.Context renamedContext)
@@ -951,7 +960,9 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     }
   }
 
-  /** Do we need to emit? */
+  /**
+   * Do we need to emit?
+   */
   private boolean needToEmit(boolean isEmpty, boolean isFinished, PaneInfo.Timing timing) {
     if (!isEmpty) {
       // The pane has elements.

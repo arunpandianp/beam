@@ -37,6 +37,8 @@ import org.joda.time.Instant;
  */
 public class FixedWindows extends PartitioningWindowFn<Object, IntervalWindow> {
 
+  public static final Instant END_OF_GLOBAL_WINDOW =
+      GlobalWindow.INSTANCE.maxTimestamp().plus(Duration.millis(1));
   /** Size of this window. */
   private final Duration size;
 
@@ -79,7 +81,6 @@ public class FixedWindows extends PartitioningWindowFn<Object, IntervalWindow> {
 
     // The global window is inclusive of max timestamp, while interval window excludes its
     // upper bound
-    Instant endOfGlobalWindow = GlobalWindow.INSTANCE.maxTimestamp().plus(Duration.millis(1));
 
     // The end of the window is either start + size if that is within the allowable range, otherwise
     // the end of the global window. Truncating the window drives many other
@@ -89,7 +90,7 @@ public class FixedWindows extends PartitioningWindowFn<Object, IntervalWindow> {
     // when we are processing data in the year 294247, we'll probably have technology that can
     // account for this.
     Instant end =
-        start.isAfter(endOfGlobalWindow.minus(size)) ? endOfGlobalWindow : start.plus(size);
+        start.isAfter(END_OF_GLOBAL_WINDOW.minus(size)) ? END_OF_GLOBAL_WINDOW : start.plus(size);
 
     return new IntervalWindow(start, end);
   }

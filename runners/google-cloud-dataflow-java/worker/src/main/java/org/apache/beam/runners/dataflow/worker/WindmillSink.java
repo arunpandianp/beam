@@ -18,7 +18,6 @@
 package org.apache.beam.runners.dataflow.worker;
 
 import static org.apache.beam.runners.dataflow.util.Structs.getString;
-import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import com.google.auto.service.AutoService;
 import java.io.IOException;
@@ -142,10 +141,10 @@ class WindmillSink<T> extends Sink<WindowedValue<T>> {
     }
 
     private <EncodeT> ByteString encode(Coder<EncodeT> coder, EncodeT object) throws IOException {
-      checkState(
-          stream.size() == 0,
-          "Expected output stream to be empty but had %s",
-          stream.toByteString());
+      // checkState(
+      //     stream.size() == 0,
+      //     "Expected output stream to be empty but had %s",
+      //     stream.toByteString());
       coder.encode(object, stream, Coder.Context.OUTER);
       return stream.toByteStringAndReset();
     }

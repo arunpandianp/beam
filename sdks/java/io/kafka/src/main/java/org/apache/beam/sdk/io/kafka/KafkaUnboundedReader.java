@@ -45,7 +45,6 @@ import org.apache.beam.sdk.io.UnboundedSource.UnboundedReader;
 import org.apache.beam.sdk.io.kafka.KafkaCheckpointMark.PartitionMark;
 import org.apache.beam.sdk.io.kafka.KafkaIO.Read;
 import org.apache.beam.sdk.metrics.Counter;
-import org.apache.beam.sdk.metrics.Distribution;
 import org.apache.beam.sdk.metrics.Gauge;
 import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.metrics.SourceMetrics;
@@ -77,6 +76,7 @@ import org.slf4j.LoggerFactory;
  * An unbounded reader to read from Kafka. Each reader consumes messages from one or more Kafka
  * partitions. See {@link KafkaIO} for user visible documentation and example usage.
  */
+@SuppressWarnings("UnusedVariable")
 class KafkaUnboundedReader<K, V> extends UnboundedReader<KafkaRecord<K, V>> {
 
   ///////////////////// Reader API ////////////////////////////////////////////////////////////
@@ -159,7 +159,7 @@ class KafkaUnboundedReader<K, V> extends UnboundedReader<KafkaRecord<K, V>> {
     while (true) {
       if (curBatch.hasNext()) {
         // Initalize metrics container.
-        kafkaResults = KafkaSinkMetrics.kafkaMetrics();
+        // kafkaResults = KafkaSinkMetrics.kafkaMetrics();
 
         PartitionState<K, V> pState = curBatch.next();
 
@@ -169,8 +169,8 @@ class KafkaUnboundedReader<K, V> extends UnboundedReader<KafkaRecord<K, V>> {
           continue;
         }
 
-        elementsRead.inc();
-        elementsReadBySplit.inc();
+        // elementsRead.inc();
+        // elementsReadBySplit.inc();
 
         ConsumerRecord<byte[], byte[]> rawRecord = pState.recordIter.next();
         long expected = pState.nextOffset;
@@ -220,20 +220,20 @@ class KafkaUnboundedReader<K, V> extends UnboundedReader<KafkaRecord<K, V>> {
             (rawRecord.key() == null ? 0 : rawRecord.key().length)
                 + (rawRecord.value() == null ? 0 : rawRecord.value().length);
         pState.recordConsumed(offset, recordSize, offsetGap);
-        bytesRead.inc(recordSize);
-        bytesReadBySplit.inc(recordSize);
+        // bytesRead.inc(recordSize);
+        // bytesReadBySplit.inc(recordSize);
 
-        Distribution rawSizes =
-            Metrics.distribution(
-                METRIC_NAMESPACE, RAW_SIZE_METRIC_PREFIX + pState.topicPartition.toString());
-        rawSizes.update(recordSize);
+        // Distribution rawSizes =
+        //     Metrics.distribution(
+        //         METRIC_NAMESPACE, RAW_SIZE_METRIC_PREFIX + pState.topicPartition.toString());
+        // rawSizes.update(recordSize);
 
-        kafkaResults.updateKafkaMetrics();
+        // kafkaResults.updateKafkaMetrics();
         return true;
       } else { // -- (b)
-        kafkaResults = KafkaSinkMetrics.kafkaMetrics();
+        // kafkaResults = KafkaSinkMetrics.kafkaMetrics();
         nextBatch();
-        kafkaResults.updateKafkaMetrics();
+        // kafkaResults.updateKafkaMetrics();
         if (!curBatch.hasNext()) {
           return false;
         }

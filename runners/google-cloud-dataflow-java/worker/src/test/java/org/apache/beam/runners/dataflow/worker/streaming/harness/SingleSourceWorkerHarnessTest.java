@@ -84,9 +84,10 @@ public class SingleSourceWorkerHarnessTest {
   public void testDispatchLoop_unexpectedFailureKillsJvm_streamingEngine() {
     SingleSourceWorkerHarness.GetWorkSender getWorkSender =
         SingleSourceWorkerHarness.GetWorkSender.forStreamingEngine(
-            workItemReceiver -> {
-              throw new RuntimeException("something bad happened");
-            });
+            (str) ->
+                workItemReceiver -> {
+                  throw new RuntimeException("something bad happened");
+                });
 
     FakeJvmRuntime fakeJvmRuntime = new FakeJvmRuntime();
     createWorkerHarness(getWorkSender, fakeJvmRuntime).start();

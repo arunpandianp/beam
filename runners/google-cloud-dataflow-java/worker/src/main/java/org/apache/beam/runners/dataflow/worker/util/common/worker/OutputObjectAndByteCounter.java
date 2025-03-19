@@ -119,7 +119,9 @@ public class OutputObjectAndByteCounter implements ElementCounter {
 
     // Increment byte counter.
     if ((byteCountObserver != null || meanByteCountObserver != null)
-        && (sampleElement() || elementByteSizeObservable.isRegisterByteSizeObserverCheap(elem))) {
+        && (sampleElement()
+        // || elementByteSizeObservable.isRegisterByteSizeObserverCheap(elem)
+        )) {
       if (byteCountObserver != null) {
         byteCountObserver.setScalingFactor(
             Math.max(samplingToken, SAMPLING_CUTOFF) / (double) SAMPLING_CUTOFF);

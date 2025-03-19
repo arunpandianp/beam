@@ -34,6 +34,7 @@ import org.apache.beam.runners.dataflow.worker.streaming.Work;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill;
 import org.apache.beam.runners.dataflow.worker.windmill.WindmillServerStub.WindmillRpcException;
 import org.apache.beam.runners.dataflow.worker.windmill.client.WindmillStream;
+import org.apache.beam.runners.dataflow.worker.windmill.client.WindmillStream.GetWorkStream;
 import org.apache.beam.runners.dataflow.worker.windmill.client.commits.WorkCommitter;
 import org.apache.beam.runners.dataflow.worker.windmill.client.getdata.GetDataClient;
 import org.apache.beam.runners.dataflow.worker.windmill.client.throttling.ThrottledTimeTracker;
@@ -85,11 +86,12 @@ public final class SingleSourceWorkerHarness implements StreamingWorkerHarness {
     this.waitForResources = waitForResources;
     this.computationStateFetcher = computationStateFetcher;
     this.workProviderExecutor =
-        Executors.newSingleThreadExecutor(
+        Executors.newFixedThreadPool(
+            2,
             new ThreadFactoryBuilder()
                 .setDaemon(true)
                 .setPriority(Thread.MIN_PRIORITY)
-                .setNameFormat("DispatchThread")
+                .setNameFormat("DispatchThread-")
                 .build());
     this.isRunning = new AtomicBoolean(false);
     this.getWorkSender = getWorkSender;
@@ -109,19 +111,25 @@ public final class SingleSourceWorkerHarness implements StreamingWorkerHarness {
     workCommitter.start();
     workProviderExecutor.execute(
         () -> {
-          getDispatchLoop().run();
+          getDispatchLoop("P0").run();
+          LOG.info("Dispatch done");
+        });
+    workProviderExecutor.execute(
+        () -> {
+          getDispatchLoop("P2").run();
           LOG.info("Dispatch done");
         });
   }
 
-  private Runnable getDispatchLoop() {
+  private Runnable getDispatchLoop(String computation) {
     switch (getWorkSender.getKind()) {
       case APPLIANCE:
         LOG.info("Starting Dispatch in Appliance mode.");
         return () -> applianceDispatchLoop(getWorkSender.appliance());
       case STREAMING_ENGINE:
         LOG.info("Starting Dispatch in Streaming Engine mode.");
-        return () -> streamingEngineDispatchLoop(getWorkSender.streamingEngine());
+        return () ->
+            streamingEngineDispatchLoop(getWorkSender.streamingEngine().apply(computation));
       default:
         // Will never happen switch is exhaustive.
         throw new IllegalStateException("Invalid GetWorkSender.Kind: " + getWorkSender.getKind());
@@ -154,7 +162,7 @@ public final class SingleSourceWorkerHarness implements StreamingWorkerHarness {
   }
 
   private void streamingEngineDispatchLoop(
-      Function<WorkItemReceiver, WindmillStream.GetWorkStream> getWorkStreamFactory) {
+      Function<WorkItemReceiver, GetWorkStream> getWorkStreamFactory) {
     while (isRunning.get()) {
       WindmillStream.GetWorkStream stream =
           getWorkStreamFactory.apply(
@@ -275,7 +283,8 @@ public final class SingleSourceWorkerHarness implements StreamingWorkerHarness {
   public abstract static class GetWorkSender {
 
     public static GetWorkSender forStreamingEngine(
-        Function<WorkItemReceiver, WindmillStream.GetWorkStream> getWorkStreamFactory) {
+        Function<String, Function<WorkItemReceiver, WindmillStream.GetWorkStream>>
+            getWorkStreamFactory) {
       return AutoOneOf_SingleSourceWorkerHarness_GetWorkSender.streamingEngine(
           getWorkStreamFactory);
     }
@@ -284,7 +293,8 @@ public final class SingleSourceWorkerHarness implements StreamingWorkerHarness {
       return AutoOneOf_SingleSourceWorkerHarness_GetWorkSender.appliance(getWorkFn);
     }
 
-    abstract Function<WorkItemReceiver, WindmillStream.GetWorkStream> streamingEngine();
+    abstract Function<String, Function<WorkItemReceiver, WindmillStream.GetWorkStream>>
+        streamingEngine();
 
     abstract Supplier<Windmill.GetWorkResponse> appliance();
 

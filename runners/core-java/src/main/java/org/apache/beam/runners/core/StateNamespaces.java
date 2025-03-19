@@ -125,6 +125,7 @@ public class StateNamespaces {
 
     private final Coder<W> windowCoder;
     private final W window;
+    private int hash;
 
     private WindowNamespace(Coder<W> windowCoder, W window) {
       this.windowCoder = windowCoder;
@@ -176,7 +177,12 @@ public class StateNamespaces {
 
     @Override
     public int hashCode() {
-      return Objects.hash(Namespace.WINDOW, window);
+      int hash = this.hash;
+      if (hash == 0) {
+        hash = Objects.hash(Namespace.WINDOW, window);
+        this.hash = hash;
+      }
+      return hash;
     }
 
     @Override
