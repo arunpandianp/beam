@@ -53,7 +53,6 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.WindowingStrategy;
 import org.apache.beam.sdk.values.WindowingStrategy.AccumulationMode;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.FluentIterable;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
@@ -272,8 +271,8 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     return activeWindows.getActiveAndNewWindows().isEmpty();
   }
 
-  private Set<W> windowsThatAreOpen(Collection<W> windows) {
-    Set<W> result = new HashSet<>();
+  private List<W> windowsThatAreOpen(Set<W> windows) {
+    List<W> result = new ArrayList<>(windows.size());
     for (W window : windows) {
       ReduceFn<K, InputT, OutputT, W>.Context directContext =
           contextFactory.base(window, StateStyle.DIRECT);
@@ -284,7 +283,7 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     return result;
   }
 
-  private Collection<W> windowsThatShouldFire(Set<W> windows) throws Exception {
+  private Collection<W> windowsThatShouldFire(List<W> windows) throws Exception {
     Collection<W> result = new ArrayList<>();
     // Filter out timers that didn't trigger.
     for (W window : windows) {
@@ -347,10 +346,10 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     prefetchWindowsForValues(windows);
 
     // All windows that are open before element processing may need to fire.
-    Set<W> windowsToConsider = windowsThatAreOpen(windows);
+    List<W> distinctWindowsToConsider = windowsThatAreOpen(windows);
     // Prefetch state necessary to determine if the triggers should fire. This is done before
     // user processing so it may fetch with user desired state.
-    for (W mergedWindow : windowsToConsider) {
+    for (W mergedWindow : distinctWindowsToConsider) {
       triggerRunner.prefetchShouldFire(
           mergedWindow, contextFactory.base(mergedWindow, StateStyle.DIRECT).state());
     }
@@ -361,7 +360,7 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
     }
 
     // Filter to windows that are firing.
-    Collection<W> windowsToFire = windowsThatShouldFire(windowsToConsider);
+    Collection<W> windowsToFire = windowsThatShouldFire(distinctWindowsToConsider);
     // Prefetch windows that are firing.
     for (W window : windowsToFire) {
       prefetchEmit(
@@ -545,16 +544,15 @@ public class ReduceFnRunner<K, InputT, OutputT, W extends BoundedWindow> {
    */
   private ImmutableSet<W> toMergedWindows(
       final Map<W, W> windowToMergeResult, final Collection<? extends BoundedWindow> windows) {
-    return ImmutableSet.copyOf(
-        FluentIterable.from(windows)
-            .transform(
-                untypedWindow -> {
-                  @SuppressWarnings("unchecked")
-                  W window = (W) untypedWindow;
-                  W mergedWindow = windowToMergeResult.get(window);
-                  // If the element is not present in the map, the window is unmerged.
-                  return (mergedWindow == null) ? window : mergedWindow;
-                }));
+    ImmutableSet.Builder<W> builder = ImmutableSet.builder();
+    for (BoundedWindow untypedWindow : windows) {
+      @SuppressWarnings("unchecked")
+      W window = (W) untypedWindow;
+      W mergedWindow = windowToMergeResult.get(window);
+      // If the element is not present in the map, the window is unmerged.
+      builder.add((mergedWindow == null) ? window : mergedWindow);
+    }
+    return builder.build();
   }
 
   private void prefetchWindowsForValues(Collection<W> windows) {
