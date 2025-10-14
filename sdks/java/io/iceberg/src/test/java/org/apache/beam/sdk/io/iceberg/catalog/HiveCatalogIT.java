@@ -21,13 +21,14 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.apache.beam.sdk.io.iceberg.catalog.hiveutils.HiveMetastoreExtension;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Maps;
 import org.apache.hadoop.hive.conf.HiveConf;
-import org.apache.hadoop.hive.metastore.api.Database;
+import org.apache.hadoop.hive.metastore.api.MetaException;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.hive.HiveCatalog;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
 
 /**
  * Read and write tests using {@link HiveCatalog}.
@@ -37,38 +38,34 @@ import org.apache.iceberg.hive.HiveCatalog;
  */
 public class HiveCatalogIT extends IcebergCatalogBaseIT {
   private static HiveMetastoreExtension hiveMetastoreExtension;
-  private static final String TEST_DB = "test_db";
 
   @Override
-  public String tableId() {
-    return String.format("%s.%s", TEST_DB, testName.getMethodName());
+  public String type() {
+    return "hive";
   }
 
-  @Override
-  public void catalogSetup() throws Exception {
+  @BeforeClass
+  public static void setUpClass() throws MetaException {
+    String warehouse = warehouse(HiveCatalogIT.class);
     hiveMetastoreExtension = new HiveMetastoreExtension(warehouse);
-    String dbPath = hiveMetastoreExtension.metastore().getDatabasePath(TEST_DB);
-    Database db = new Database(TEST_DB, "description", dbPath, Maps.newHashMap());
-    hiveMetastoreExtension.metastoreClient().createDatabase(db);
+  }
+
+  @AfterClass
+  public static void tearDown() throws Exception {
+    if (hiveMetastoreExtension != null) {
+      hiveMetastoreExtension.cleanup();
+    }
   }
 
   @Override
   public Catalog createCatalog() {
     return CatalogUtil.loadCatalog(
         HiveCatalog.class.getName(),
-        "hive_" + catalogName,
+        catalogName,
         ImmutableMap.of(
             CatalogProperties.CLIENT_POOL_CACHE_EVICTION_INTERVAL_MS,
             String.valueOf(TimeUnit.SECONDS.toMillis(10))),
         hiveMetastoreExtension.hiveConf());
-  }
-
-  @Override
-  public void catalogCleanup() throws Exception {
-    System.out.println("xxx CLEANING UP!");
-    if (hiveMetastoreExtension != null) {
-      hiveMetastoreExtension.cleanup();
-    }
   }
 
   @Override
@@ -78,11 +75,15 @@ public class HiveCatalogIT extends IcebergCatalogBaseIT {
     Map<String, String> confProperties =
         ImmutableMap.<String, String>builder()
             .put(HiveConf.ConfVars.METASTOREURIS.varname, metastoreUri)
+            .put(HiveConf.ConfVars.METASTOREWAREHOUSE.varname, warehouse)
             .build();
 
     return ImmutableMap.<String, Object>builder()
         .put("table", tableId)
-        .put("name", "hive_" + catalogName)
+        .put("catalog_name", "hive_" + catalogName)
+        .put(
+            "catalog_properties",
+            ImmutableMap.of("io-impl", "org.apache.iceberg.gcp.gcs.GCSFileIO"))
         .put("config_properties", confProperties)
         .build();
   }

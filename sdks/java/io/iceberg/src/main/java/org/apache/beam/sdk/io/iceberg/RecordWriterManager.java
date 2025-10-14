@@ -33,8 +33,8 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.util.Preconditions;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.Row;
+import org.apache.beam.sdk.values.WindowedValue;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Splitter;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.Cache;
@@ -49,15 +49,14 @@ import org.apache.iceberg.PartitionKey;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.Catalog;
+import org.apache.iceberg.catalog.Namespace;
+import org.apache.iceberg.catalog.SupportsNamespaces;
 import org.apache.iceberg.catalog.TableIdentifier;
-import org.apache.iceberg.data.GenericRecord;
+import org.apache.iceberg.data.InternalRecordWrapper;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
-import org.apache.iceberg.expressions.Literal;
-import org.apache.iceberg.transforms.Transform;
 import org.apache.iceberg.transforms.Transforms;
-import org.apache.iceberg.types.Types;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -96,7 +95,9 @@ class RecordWriterManager implements AutoCloseable {
     private final IcebergDestination icebergDestination;
     private final PartitionSpec spec;
     private final org.apache.iceberg.Schema schema;
-    private final PartitionKey partitionKey;
+    // used to determine the partition to which a record belongs
+    // must not be directly used to create a writer
+    private final PartitionKey routingPartitionKey;
     private final Table table;
     private final String stateToken = UUID.randomUUID().toString();
     final Cache<PartitionKey, RecordWriter> writers;
@@ -104,12 +105,14 @@ class RecordWriterManager implements AutoCloseable {
     @VisibleForTesting final Map<PartitionKey, Integer> writerCounts = Maps.newHashMap();
     private final Map<String, PartitionField> partitionFieldMap = Maps.newHashMap();
     private final List<Exception> exceptions = Lists.newArrayList();
+    private final InternalRecordWrapper wrapper; // wrapper that facilitates partitioning
 
     DestinationState(IcebergDestination icebergDestination, Table table) {
       this.icebergDestination = icebergDestination;
       this.schema = table.schema();
       this.spec = table.spec();
-      this.partitionKey = new PartitionKey(spec, schema);
+      this.routingPartitionKey = new PartitionKey(spec, schema);
+      this.wrapper = new InternalRecordWrapper(schema.asStruct());
       this.table = table;
       for (PartitionField partitionField : spec.fields()) {
         partitionFieldMap.put(partitionField.name(), partitionField);
@@ -154,12 +157,13 @@ class RecordWriterManager implements AutoCloseable {
      * can't create a new writer, the {@link Record} is rejected and {@code false} is returned.
      */
     boolean write(Record record) {
-      partitionKey.partition(getPartitionableRecord(record));
+      routingPartitionKey.partition(wrapper.wrap(record));
 
-      if (!writers.asMap().containsKey(partitionKey) && openWriters >= maxNumWriters) {
+      @Nullable RecordWriter writer = writers.getIfPresent(routingPartitionKey);
+      if (writer == null && openWriters >= maxNumWriters) {
         return false;
       }
-      RecordWriter writer = fetchWriterForPartition(partitionKey);
+      writer = fetchWriterForPartition(routingPartitionKey, writer);
       writer.write(record);
       return true;
     }
@@ -169,14 +173,15 @@ class RecordWriterManager implements AutoCloseable {
      * no {@link RecordWriter} exists or if it has reached the maximum limit of bytes written, a new
      * one is created and returned.
      */
-    private RecordWriter fetchWriterForPartition(PartitionKey partitionKey) {
-      RecordWriter recordWriter = writers.getIfPresent(partitionKey);
-
+    private RecordWriter fetchWriterForPartition(
+        PartitionKey partitionKey, @Nullable RecordWriter recordWriter) {
       if (recordWriter == null || recordWriter.bytesWritten() > maxFileSize) {
+        // each writer must have its own PartitionKey object
+        PartitionKey copy = partitionKey.copy();
         // calling invalidate for a non-existent key is a safe operation
-        writers.invalidate(partitionKey);
-        recordWriter = createWriter(partitionKey);
-        writers.put(partitionKey, recordWriter);
+        writers.invalidate(copy);
+        recordWriter = createWriter(copy);
+        writers.put(copy, recordWriter);
       }
       return recordWriter;
     }
@@ -202,30 +207,6 @@ class RecordWriterManager implements AutoCloseable {
                 icebergDestination.getTableIdentifier(), partitionKey),
             e);
       }
-    }
-
-    /**
-     * Resolves an input {@link Record}'s partition values and returns another {@link Record} that
-     * can be applied to the destination's {@link PartitionSpec}.
-     */
-    private Record getPartitionableRecord(Record record) {
-      if (spec.isUnpartitioned()) {
-        return record;
-      }
-      Record output = GenericRecord.create(schema);
-      for (PartitionField partitionField : spec.fields()) {
-        Transform<?, ?> transform = partitionField.transform();
-        Types.NestedField field = schema.findField(partitionField.sourceId());
-        String name = field.name();
-        Object value = record.getField(name);
-        @Nullable Literal<Object> literal = Literal.of(value.toString()).to(field.type());
-        if (literal == null || transform.isVoid() || transform.isIdentity()) {
-          output.setField(name, value);
-        } else {
-          output.setField(name, literal.value());
-        }
-      }
-      return output;
     }
   }
 
@@ -298,32 +279,62 @@ class RecordWriterManager implements AutoCloseable {
    * implementation. Although it is expected, some implementations may not support creating a table
    * using the Iceberg API.
    */
-  private Table getOrCreateTable(TableIdentifier identifier, Schema dataSchema) {
+  private Table getOrCreateTable(IcebergDestination destination, Schema dataSchema) {
+    TableIdentifier identifier = destination.getTableIdentifier();
     @Nullable Table table = TABLE_CACHE.getIfPresent(identifier);
-    if (table == null) {
-      synchronized (TABLE_CACHE) {
-        try {
-          table = catalog.loadTable(identifier);
-        } catch (NoSuchTableException e) {
-          try {
-            org.apache.iceberg.Schema tableSchema =
-                IcebergUtils.beamSchemaToIcebergSchema(dataSchema);
-            // TODO(ahmedabu98): support creating a table with a specified partition spec
-            table = catalog.createTable(identifier, tableSchema);
-            LOG.info("Created Iceberg table '{}' with schema: {}", identifier, tableSchema);
-          } catch (AlreadyExistsException alreadyExistsException) {
-            // handle race condition where workers are concurrently creating the same table.
-            // if running into already exists exception, we perform one last load
-            table = catalog.loadTable(identifier);
-          }
-        }
-        TABLE_CACHE.put(identifier, table);
-      }
-    } else {
+    if (table != null) {
       // If fetching from cache, refresh the table to avoid working with stale metadata
       // (e.g. partition spec)
       table.refresh();
+      return table;
     }
+
+    Namespace namespace = identifier.namespace();
+    @Nullable IcebergTableCreateConfig createConfig = destination.getTableCreateConfig();
+    PartitionSpec partitionSpec =
+        createConfig != null ? createConfig.getPartitionSpec() : PartitionSpec.unpartitioned();
+    Map<String, String> tableProperties =
+        createConfig != null && createConfig.getTableProperties() != null
+            ? createConfig.getTableProperties()
+            : Maps.newHashMap();
+
+    synchronized (TABLE_CACHE) {
+      // Create namespace if it does not exist yet
+      if (!namespace.isEmpty() && catalog instanceof SupportsNamespaces) {
+        SupportsNamespaces supportsNamespaces = (SupportsNamespaces) catalog;
+        if (!supportsNamespaces.namespaceExists(namespace)) {
+          try {
+            supportsNamespaces.createNamespace(namespace);
+            LOG.info("Created new namespace '{}'.", namespace);
+          } catch (AlreadyExistsException ignored) {
+            // race condition: another worker already created this namespace
+          }
+        }
+      }
+
+      // If table exists, just load it
+      // Note: the implementation of catalog.tableExists() will load the table to check its
+      // existence. We don't use it here to avoid double loadTable() calls.
+      try {
+        table = catalog.loadTable(identifier);
+      } catch (NoSuchTableException e) { // Otherwise, create the table
+        org.apache.iceberg.Schema tableSchema = IcebergUtils.beamSchemaToIcebergSchema(dataSchema);
+        try {
+          table = catalog.createTable(identifier, tableSchema, partitionSpec, tableProperties);
+          LOG.info(
+              "Created Iceberg table '{}' with schema: {}\n, partition spec: {}, table properties: {}",
+              identifier,
+              tableSchema,
+              partitionSpec,
+              tableProperties);
+        } catch (AlreadyExistsException ignored) {
+          // race condition: another worker already created this table
+          table = catalog.loadTable(identifier);
+        }
+      }
+    }
+
+    TABLE_CACHE.put(identifier, table);
     return table;
   }
 
@@ -339,9 +350,9 @@ class RecordWriterManager implements AutoCloseable {
         destinations.computeIfAbsent(
             icebergDestination,
             destination -> {
-              TableIdentifier identifier = destination.getValue().getTableIdentifier();
-              Table table = getOrCreateTable(identifier, row.getSchema());
-              return new DestinationState(destination.getValue(), table);
+              IcebergDestination dest = destination.getValue();
+              Table table = getOrCreateTable(dest, row.getSchema());
+              return new DestinationState(dest, table);
             });
 
     Record icebergRecord = IcebergUtils.beamRowToIcebergRecord(destinationState.schema, row);

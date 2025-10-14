@@ -59,15 +59,58 @@ func (*combine) PrepareUrns() []string {
 
 // PrepareTransform returns lifted combines and removes the leaves if enabled. Otherwise returns nothing.
 func (h *combine) PrepareTransform(tid string, t *pipepb.PTransform, comps *pipepb.Components) prepareResult {
-	// If we aren't lifting, the "default impl" for combines should be sufficient.
-	if !h.config.EnableLifting {
-		return prepareResult{
-			SubbedComps: &pipepb.Components{
-				Transforms: map[string]*pipepb.PTransform{
-					tid: t,
-				},
-			},
+
+	onlyInput := getOnlyValue(t.GetInputs())
+	combineInput := comps.GetPcollections()[onlyInput]
+	ws := comps.GetWindowingStrategies()[combineInput.GetWindowingStrategyId()]
+
+	var hasTriggerType func(tpb *pipepb.Trigger, targetTriggerType reflect.Type) bool
+
+	hasTriggerType = func(tpb *pipepb.Trigger, targetTriggerType reflect.Type) bool {
+		if tpb == nil {
+			return false
 		}
+		switch at := tpb.GetTrigger().(type) {
+		case *pipepb.Trigger_AfterAll_:
+			for _, st := range at.AfterAll.GetSubtriggers() {
+				if hasTriggerType(st, targetTriggerType) {
+					return true
+				}
+			}
+			return false
+		case *pipepb.Trigger_AfterAny_:
+			for _, st := range at.AfterAny.GetSubtriggers() {
+				if hasTriggerType(st, targetTriggerType) {
+					return true
+				}
+			}
+			return false
+		case *pipepb.Trigger_AfterEach_:
+			for _, st := range at.AfterEach.GetSubtriggers() {
+				if hasTriggerType(st, targetTriggerType) {
+					return true
+				}
+			}
+			return false
+		case *pipepb.Trigger_AfterEndOfWindow_:
+			return hasTriggerType(at.AfterEndOfWindow.GetEarlyFirings(), targetTriggerType) ||
+				hasTriggerType(at.AfterEndOfWindow.GetLateFirings(), targetTriggerType)
+		case *pipepb.Trigger_OrFinally_:
+			return hasTriggerType(at.OrFinally.GetMain(), targetTriggerType) ||
+				hasTriggerType(at.OrFinally.GetFinally(), targetTriggerType)
+		case *pipepb.Trigger_Repeat_:
+			return hasTriggerType(at.Repeat.GetSubtrigger(), targetTriggerType)
+		default:
+			return reflect.TypeOf(at) == targetTriggerType
+		}
+	}
+
+	// If we aren't lifting, the "default impl" for combines should be sufficient.
+	// Disable lifting if there is any TriggerElementCount or TriggerAlways.
+	if (!h.config.EnableLifting ||
+		hasTriggerType(ws.GetTrigger(), reflect.TypeOf(&pipepb.Trigger_ElementCount_{})) ||
+		hasTriggerType(ws.GetTrigger(), reflect.TypeOf(&pipepb.Trigger_Always_{}))) {
+		return prepareResult{} // Strip the composite layer when lifting is disabled.
 	}
 
 	// To lift a combine, the spec should contain a CombinePayload.

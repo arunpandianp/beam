@@ -23,11 +23,9 @@ import logging
 import os
 import pprint
 import re
+from collections.abc import Iterable
+from collections.abc import Mapping
 from typing import Any
-from typing import Iterable
-from typing import List
-from typing import Mapping
-from typing import Set
 
 import jinja2
 import yaml
@@ -36,8 +34,13 @@ import apache_beam as beam
 from apache_beam.io.filesystems import FileSystems
 from apache_beam.options.pipeline_options import GoogleCloudOptions
 from apache_beam.transforms.fully_qualified_named_transform import FullyQualifiedNamedTransform
+from apache_beam.typehints import schemas
+from apache_beam.typehints import typehints
+from apache_beam.yaml import json_utils
 from apache_beam.yaml import yaml_provider
+from apache_beam.yaml import yaml_utils
 from apache_beam.yaml.yaml_combine import normalize_combine
+from apache_beam.yaml.yaml_mapping import Validate
 from apache_beam.yaml.yaml_mapping import normalize_mapping
 from apache_beam.yaml.yaml_mapping import validate_generic_expressions
 from apache_beam.yaml.yaml_utils import SafeLineLoader
@@ -55,12 +58,11 @@ except ImportError:
 
 @functools.lru_cache
 def pipeline_schema(strictness):
-  with open(os.path.join(os.path.dirname(__file__),
-                         'pipeline.schema.yaml')) as yaml_file:
+  with open(yaml_utils.locate_data_file('pipeline.schema.yaml')) as yaml_file:
     pipeline_schema = yaml.safe_load(yaml_file)
   if strictness == 'per_transform':
-    transform_schemas_path = os.path.join(
-        os.path.dirname(__file__), 'transforms.schema.yaml')
+    transform_schemas_path = yaml_utils.locate_data_file(
+        'transforms.schema.yaml')
     if not os.path.exists(transform_schemas_path):
       raise RuntimeError(
           "Please run "
@@ -87,6 +89,12 @@ def validate_against_schema(pipeline, strictness):
     jsonschema.validate(pipeline, pipeline_schema(strictness))
   except jsonschema.ValidationError as exn:
     exn.message += f" around line {_closest_line(pipeline, exn.path)}"
+    # validation message for chain-type transform
+    if (exn.schema_path[-1] == 'not' and
+        exn.schema_path[-2] in ['input', 'output']):
+      exn.message = (
+          f"'{exn.schema_path[-2]}' should not be used "
+          "along with 'chain' type transforms. " + exn.message)
     raise exn
 
 
@@ -163,6 +171,9 @@ class LightweightScope(object):
       else:
         return only_element(candidates)
 
+  def get_transform_spec(self, transform_name_or_id):
+    return self._transforms_by_uuid[self.get_transform_id(transform_name_or_id)]
+
 
 class Scope(LightweightScope):
   """To look up PCollections (typically outputs of prior transforms) by name."""
@@ -177,7 +188,7 @@ class Scope(LightweightScope):
     self.root = root
     self._inputs = inputs
     self.providers = providers
-    self._seen_names: Set[str] = set()
+    self._seen_names: set[str] = set()
     self.input_providers = input_providers
     self._all_followers = None
 
@@ -239,13 +250,26 @@ class Scope(LightweightScope):
       spec = t
     else:
       spec = self._transforms_by_uuid[self.get_transform_id(t)]
-    possible_providers = [
-        p for p in self.providers[spec['type']] if p.available()
-    ]
+    possible_providers = []
+    unavailable_provider_messages = []
+    for p in self.providers[spec['type']]:
+      is_available = p.available()
+      if is_available:
+        possible_providers.append(p)
+      else:
+        reason = getattr(is_available, 'reason', 'no reason given')
+        unavailable_provider_messages.append(
+            f'{p.__class__.__name__} ({reason})')
     if not possible_providers:
+      if unavailable_provider_messages:
+        unavailable_provider_message = (
+            '\nThe following providers were found but not available: ' +
+            '\n'.join(unavailable_provider_messages))
+      else:
+        unavailable_provider_message = ''
       raise ValueError(
-          'No available provider for type %r at %s' %
-          (spec['type'], identify_object(spec)))
+          'No available provider for type %r at %s%s' %
+          (spec['type'], identify_object(spec), unavailable_provider_message))
     # From here on, we have the invariant that possible_providers is not empty.
 
     # Only one possible provider, no need to rank further.
@@ -255,7 +279,7 @@ class Scope(LightweightScope):
     def best_matches(
         possible_providers: Iterable[yaml_provider.Provider],
         adjacent_provider_options: Iterable[Iterable[yaml_provider.Provider]]
-    ) -> List[yaml_provider.Provider]:
+    ) -> list[yaml_provider.Provider]:
       """Given a set of possible providers, and a set of providers for each
       adjacent transform, returns the top possible providers as ranked by
       affinity to the adjacent transforms' providers.
@@ -306,8 +330,43 @@ class Scope(LightweightScope):
 
   # A method on scope as providers may be scoped...
   def create_ptransform(self, spec, input_pcolls):
+    def maybe_with_resource_hints(transform):
+      if 'resource_hints' in spec:
+        return transform.with_resource_hints(
+            **SafeLineLoader.strip_metadata(spec['resource_hints']))
+      else:
+        return transform
+
     if 'type' not in spec:
       raise ValueError(f'Missing transform type: {identify_object(spec)}')
+
+    if spec['type'] == 'composite':
+
+      class _CompositeTransformStub(beam.PTransform):
+        @staticmethod
+        def expand(pcolls):
+          if isinstance(pcolls, beam.PCollection):
+            pcolls = {'input': pcolls}
+          elif isinstance(pcolls, beam.pvalue.PBegin):
+            pcolls = {}
+
+          inner_scope = Scope(
+              self.root,
+              pcolls,
+              spec['transforms'],
+              self.providers,
+              self.input_providers)
+          inner_scope.compute_all()
+          if '__implicit_outputs__' in spec['output']:
+            return inner_scope.get_outputs(
+                spec['output']['__implicit_outputs__'])
+          else:
+            return {
+                key: inner_scope.get_pcollection(value)
+                for (key, value) in spec['output'].items()
+            }
+
+      return maybe_with_resource_hints(_CompositeTransformStub())
 
     if spec['type'] not in self.providers:
       raise ValueError(
@@ -322,6 +381,9 @@ class Scope(LightweightScope):
         if pcoll in providers_by_input
     ]
     provider = self.best_provider(spec, input_providers)
+    extra_dependencies, spec = extract_extra_dependencies(spec)
+    if extra_dependencies:
+      provider = provider.with_extra_dependencies(frozenset(extra_dependencies))
 
     config = SafeLineLoader.strip_metadata(spec.get('config', {}))
     if not isinstance(config, dict):
@@ -342,15 +404,22 @@ class Scope(LightweightScope):
             spec['type'].rsplit('-', 1)[0], config, input_pcolls)
 
       # pylint: disable=undefined-loop-variable
-      ptransform = provider.create_transform(
-          spec['type'], config, self.create_ptransform)
+      ptransform = maybe_with_resource_hints(
+          provider.create_transform(
+              spec['type'],
+              config,
+              lambda config, input_pcolls=input_pcolls: self.create_ptransform(
+                  config, input_pcolls)))
       # TODO(robertwb): Should we have a better API for adding annotations
       # than this?
-      annotations = dict(
-          yaml_type=spec['type'],
-          yaml_args=json.dumps(config),
-          yaml_provider=json.dumps(provider.to_json()),
-          **ptransform.annotations())
+      annotations = {
+          **{
+              'yaml_type': spec['type'],
+              'yaml_args': json.dumps(config),
+              'yaml_provider': json.dumps(provider.to_json())
+          },
+          **ptransform.annotations()
+      }
       ptransform.annotations = lambda: annotations
       original_expand = ptransform.expand
 
@@ -389,7 +458,8 @@ class Scope(LightweightScope):
     if 'name' in spec:
       name = spec['name']
       strictness += 1
-    elif 'ExternalTransform' not in ptransform.label:
+    elif ('ExternalTransform' not in ptransform.label and
+          not ptransform.label.startswith('_')):
       # The label may have interesting information.
       name = ptransform.label
     else:
@@ -415,6 +485,15 @@ def expand_transform(spec, scope):
 
 
 def expand_leaf_transform(spec, scope):
+  spec = spec.copy()
+
+  # Check for optional output_schema to verify on.
+  # The idea is to pass this output_schema config to the ValidateWithSchema
+  # transform.
+  output_schema_spec = {}
+  if 'output_schema' in spec.get('config', {}):
+    output_schema_spec = spec.get('config').pop('output_schema')
+
   spec = normalize_inputs_outputs(spec)
   inputs_dict = {
       key: scope.get_pcollection(value)
@@ -441,6 +520,20 @@ def expand_leaf_transform(spec, scope):
   except Exception as exn:
     raise ValueError(
         f"Error applying transform {identify_object(spec)}: {exn}") from exn
+
+  # Optional output_schema was found, so lets expand on that before returning.
+  if output_schema_spec:
+    error_handling_spec = {}
+    # Obtain original transform error_handling_spec, so that all validate
+    # schema errors use that.
+    if 'error_handling' in spec.get('config', None):
+      error_handling_spec = spec.get('config').get('error_handling', {})
+
+    outputs = expand_output_schema_transform(
+        spec=output_schema_spec,
+        outputs=outputs,
+        error_handling_spec=error_handling_spec)
+
   if isinstance(outputs, dict):
     # TODO: Handle (or at least reject) nested case.
     return outputs
@@ -456,6 +549,250 @@ def expand_leaf_transform(spec, scope):
         f'{type(outputs)}')
 
 
+def expand_output_schema_transform(spec, outputs, error_handling_spec):
+  """Applies a `Validate` transform to the output of another transform.
+
+  This function is called when an `output_schema` is defined on a transform.
+  It wraps the original transform's output(s) with a `Validate` transform
+  to ensure the data conforms to the specified schema.
+
+  If the original transform has error handling configured, validation errors
+  will be routed to the specified error output. If not, validation failures
+  will cause the pipeline to fail.
+
+  Args:
+    spec (dict): The `output_schema` specification from the YAML config.
+    outputs (beam.PCollection or dict[str, beam.PCollection]): The output(s)
+      from the transform to be validated.
+    error_handling_spec (dict): The `error_handling` configuration from the
+      original transform.
+
+  Returns:
+    The validated PCollection(s). If error handling is enabled, this will be a
+    dictionary containing the 'good' output and any error outputs.
+
+  Raises:
+    ValueError: If `error_handling` is incorrectly specified within the
+      `output_schema` spec itself, or if the main output of a multi-output
+      transform cannot be determined.
+  """
+  if 'error_handling' in spec:
+    raise ValueError(
+        'error_handling config is not supported directly in '
+        'the output_schema. Please use error_handling config in '
+        'the transform, if possible, or use ValidateWithSchema transform '
+        'instead.')
+
+  # Strip metadata such as __line__ and __uuid__ as these will interfere with
+  # the validation downstream.
+  clean_schema = SafeLineLoader.strip_metadata(spec)
+
+  # If no error handling is specified for the main transform, warn the user
+  # that the pipeline may fail if any output data fails the output schema
+  # validation.
+  if not error_handling_spec:
+    _LOGGER.warning("Output_schema config is attached to a transform that has "\
+    "no error_handling config specified. Any failures validating on output" \
+    "schema will fail the pipeline unless the user specifies an" \
+    "error_handling config on a capable transform. Alternatively, you can " \
+    "remove the output_schema config on this transform and add a " \
+    "ValidateWithSchema transform with separate error handling downstream of " \
+    "the current transform.")
+
+  # The transform produced outputs with a single beam.PCollection
+  if isinstance(outputs, beam.PCollection):
+    outputs = _enforce_schema(
+        outputs, 'EnforceOutputSchema', error_handling_spec, clean_schema)
+    if isinstance(outputs, dict):
+      main_tag = error_handling_spec.get('main_tag', 'good')
+      main_output = outputs.pop(main_tag)
+      if error_handling_spec:
+        error_output_tag = error_handling_spec.get('output')
+        if error_output_tag in outputs:
+          return {
+              'output': main_output,
+              error_output_tag: outputs.pop(error_output_tag)
+          }
+      return main_output
+
+  # The transform produced outputs with many named PCollections and need to
+  # determine which PCollection should be validated on.
+  elif isinstance(outputs, dict):
+    main_output_key = get_main_output_key(spec, outputs, error_handling_spec)
+
+    validation_result = _enforce_schema(
+        outputs[main_output_key],
+        f'EnforceOutputSchema_{main_output_key}',
+        error_handling_spec,
+        clean_schema)
+    outputs = _integrate_validation_results(
+        outputs, validation_result, main_output_key, error_handling_spec)
+
+  return outputs
+
+
+def get_main_output_key(spec, outputs, error_handling_spec):
+  """Determines the main output key from a dictionary of PCollections.
+
+  This is used to identify which output of a multi-output transform should be
+  validated against an `output_schema`.
+
+  The main output is determined using the following precedence:
+  1. An output with the key 'output'.
+  2. An output with the key 'good'.
+  3. The single output if there is only one.
+
+  Args:
+    spec: The transform specification, used for creating informative error
+      messages.
+    outputs: A dictionary mapping output tags to their corresponding
+      PCollections.
+    error_handling_spec (dict): The `error_handling` configuration from the
+      original transform.
+
+  Returns:
+    The key of the main output PCollection.
+
+  Raises:
+    ValueError: If a main output cannot be determined because there are
+      multiple outputs and none are named 'output' or 'good'.
+  """
+  main_output_key = 'output'
+  if main_output_key not in outputs:
+    if 'good' in outputs:
+      main_output_key = 'good'
+    elif len(outputs) == 1:
+      main_output_key = next(iter(outputs.keys()))
+    else:
+      raise ValueError(
+          f"Transform {identify_object(spec)} has outputs "
+          f"{list(outputs.keys())}, but none are named 'output' or 'good'. To "
+          "apply an 'output_schema', please ensure the transform has exactly "
+          "one output, or that the main output is named 'output' or 'good'.")
+
+  if len(outputs) >= 3 or \
+    (len(outputs) == 2 and error_handling_spec.get('output') not in outputs):
+    _LOGGER.warning(
+        "There are currently %s outputs: %s. Only the main output will be "
+        "validated.",
+        len(outputs),
+        outputs)
+
+  return main_output_key
+
+
+def _integrate_validation_results(
+    outputs, validation_result, main_output_key, error_handling_spec):
+  """
+  Integrates the results of a validation transform back into the outputs of
+  the original transform.
+
+  This function handles merging the "good" and "bad" outputs from a
+  `Validate` transform with the existing outputs of the transform that was
+  validated.
+
+  Args:
+    outputs: The original dictionary of output PCollections from the transform.
+    validation_result: The output of the `Validate` transform. This can be a
+      single PCollection (if all elements passed) or a dictionary of
+      PCollections (if error handling was enabled for validation).
+    main_output_key: The key in the `outputs` dictionary corresponding to the
+      PCollection that was validated.
+    error_handling_spec: The error handling configuration of the original
+      transform.
+
+  Returns:
+    The updated dictionary of output PCollections, with validation results
+    integrated.
+
+  Raises:
+    ValueError: If the validation transform produces unexpected outputs.
+  """
+  if not isinstance(validation_result, dict):
+    outputs[main_output_key] = validation_result
+    return outputs
+
+  # The main output from validation is the good output.
+  main_tag = error_handling_spec.get('main_tag', 'good')
+  outputs[main_output_key] = validation_result.pop(main_tag)
+
+  if error_handling_spec:
+    error_output_tag = error_handling_spec['output']
+    if error_output_tag in validation_result:
+      schema_error_pcoll = validation_result.pop(error_output_tag)
+      # The original transform also had an error output. Merge them.
+      outputs[error_output_tag] = (
+          (outputs[error_output_tag], schema_error_pcoll)
+          | f'FlattenErrors_{main_output_key}' >> beam.Flatten())
+
+    # There should be no other outputs from validation.
+    if validation_result:
+      raise ValueError(
+          "Unexpected outputs from validation: "
+          f"{list(validation_result.keys())}")
+
+  return outputs
+
+
+def _enforce_schema(pcoll, label, error_handling_spec, clean_schema):
+  """Applies schema to PCollection elements if necessary, then validates.
+
+  This function ensures that the input PCollection conforms to a specified
+  schema. If the PCollection is schemaless (i.e., its element_type is Any),
+  it attempts to convert its elements into schema-aware `beam.Row` objects
+  based on the provided `clean_schema`. After ensuring the PCollection has
+  a defined schema, it applies a `Validate` transform to perform the actual
+  schema validation.
+
+  Args:
+    pcoll: The input PCollection to be schema-enforced and validated.
+    label: A string label to be used for the Beam transforms created within this
+    function.
+    error_handling_spec: A dictionary specifying how to handle validation
+    errors.
+    clean_schema: A dictionary representing the schema to enforce and validate
+    against.
+
+  Returns:
+    A PCollection (or PCollectionTuple if error handling is enabled) resulting
+    from the `Validate` transform.
+  """
+  if pcoll.element_type == typehints.Any:
+    _LOGGER.info(
+        "PCollection for %s has no schema (element_type=Any). "
+        "Converting elements to beam.Row based on provided output_schema.",
+        label)
+    try:
+      # Attempt to confer the schemaless elements into schema-aware beam.Row
+      # objects
+      beam_schema = json_utils.json_schema_to_beam_schema(clean_schema)
+      row_type_constraint = schemas.named_tuple_from_schema(beam_schema)
+
+      def to_row(element):
+        """
+        Convert a single element into the row type constraint type.
+        """
+        if isinstance(element, dict):
+          return row_type_constraint(**element)
+        elif hasattr(element, '_asdict'):  # Handle NamedTuple, beam.Row
+          return row_type_constraint(**element._asdict())
+        else:
+          raise TypeError(
+              f"Cannot convert element of type {type(element)} to beam.Row "
+              f"for validation in {label}. Element: {element}")
+
+      pcoll = pcoll | f'{label}_ConvertToRow' >> beam.Map(
+          to_row).with_output_types(row_type_constraint)
+    except Exception as e:
+      raise ValueError(
+          f"Failed to prepare schemaless PCollection for \
+            validation in {label}: {e}") from e
+
+  # Add Validation step downstream of current transform
+  return pcoll | label >> Validate(
+      schema=clean_schema, error_handling=error_handling_spec)
+
+
 def expand_composite_transform(spec, scope):
   spec = normalize_inputs_outputs(normalize_source_sink(spec))
 
@@ -466,8 +803,9 @@ def expand_composite_transform(spec, scope):
           for (key, value) in empty_if_explicitly_empty(spec['input']).items()
       },
       spec['transforms'],
+      # TODO(robertwb): Are scoped providers ever used? Worth supporting?
       yaml_provider.merge_providers(
-          yaml_provider.parse_providers(spec.get('providers', [])),
+          yaml_provider.parse_providers('', spec.get('providers', [])),
           scope.providers),
       scope.input_providers)
 
@@ -483,16 +821,21 @@ def expand_composite_transform(spec, scope):
             for (key, value) in spec['output'].items()
         }
 
+  transform = CompositePTransform()
+  if 'resource_hints' in spec:
+    transform = transform.with_resource_hints(
+        **SafeLineLoader.strip_metadata(spec['resource_hints']))
+
   if 'name' not in spec:
     spec['name'] = 'Composite'
   if spec['name'] is None:  # top-level pipeline, don't nest
-    return CompositePTransform.expand(None)
+    return transform.expand(None)
   else:
     _LOGGER.info("Expanding %s ", identify_object(spec))
     return ({
         key: scope.get_pcollection(value)
         for (key, value) in empty_if_explicitly_empty(spec['input']).items()
-    } or scope.root) | scope.unique_name(spec, None) >> CompositePTransform()
+    } or scope.root) | scope.unique_name(spec, None) >> transform
 
 
 def expand_chain_transform(spec, scope):
@@ -513,9 +856,10 @@ def chain_as_composite(spec):
     raise TypeError(
         f"Chain at {identify_object(spec)} missing transforms property.")
   has_explicit_outputs = 'output' in spec
-  composite_spec = normalize_inputs_outputs(tag_explicit_inputs(spec))
+  composite_spec = dict(normalize_inputs_outputs(tag_explicit_inputs(spec)))
   new_transforms = []
   for ix, transform in enumerate(composite_spec['transforms']):
+    transform = dict(transform)
     if any(io in transform for io in ('input', 'output')):
       if (ix == 0 and 'input' in transform and 'output' not in transform and
           is_explicitly_empty(transform['input'])):
@@ -651,6 +995,17 @@ def extract_name(spec):
     return ''
 
 
+def extract_extra_dependencies(spec):
+  deps = spec.get('config', {}).get('dependencies', [])
+  if not deps:
+    return [], spec
+  if not isinstance(deps, list):
+    raise TypeError(f'Dependencies must be a list of strings, got {deps}')
+  return deps, dict(
+      spec,
+      config={k: v for k, v in spec['config'].items() if k != 'dependencies'})
+
+
 def push_windowing_to_roots(spec):
   scope = LightweightScope(spec['transforms'])
   consumed_outputs_by_transform = collections.defaultdict(set)
@@ -717,6 +1072,9 @@ def preprocess_windowing(spec):
         'transforms': [modified_spec] + windowing_transforms,
         'input': spec['input'],
         'output': modified_spec['__uuid__'],
+        'config': {
+            'error_handling': spec.get('config', {}).get('error_handling', {})
+        },
         '__line__': spec['__line__'],
         '__uuid__': spec['__uuid__'],
     }
@@ -751,6 +1109,9 @@ def preprocess_windowing(spec):
         'name': spec.get('name', None) or spec['type'],
         'transforms': [modified_spec] + windowing_transforms,
         'output': windowed_outputs,
+        'config': {
+            'error_handling': spec.get('config', {}).get('error_handling', {})
+        },
         '__line__': spec['__line__'],
         '__uuid__': spec['__uuid__'],
     }
@@ -771,8 +1132,8 @@ def preprocess_flattened_inputs(spec):
       def all_inputs(t):
         for key, values in t.get('input', {}).items():
           if isinstance(values, list):
-            for ix, values in enumerate(values):
-              yield f'{key}{ix}', values
+            for ix, value in enumerate(values):
+              yield f'{key}{ix}', value
           else:
             yield key, values
 
@@ -844,8 +1205,10 @@ def lift_config(spec):
   if 'config' not in spec:
     common_params = 'name', 'type', 'input', 'output', 'transforms'
     return {
-        'config': {k: v
-                   for (k, v) in spec.items() if k not in common_params},
+        'config': {
+            k: v
+            for (k, v) in spec.items() if k not in common_params
+        },
         **{
             k: v
             for (k, v) in spec.items()  #
@@ -862,16 +1225,17 @@ def ensure_config(spec):
   return spec
 
 
+def apply_phase(phase, spec):
+  spec = phase(spec)
+  if spec['type'] in {'composite', 'chain'} and 'transforms' in spec:
+    spec = dict(
+        spec, transforms=[apply_phase(phase, t) for t in spec['transforms']])
+  return spec
+
+
 def preprocess(spec, verbose=False, known_transforms=None):
   if verbose:
     pprint.pprint(spec)
-
-  def apply(phase, spec):
-    spec = phase(spec)
-    if spec['type'] in {'composite', 'chain'} and 'transforms' in spec:
-      spec = dict(
-          spec, transforms=[apply(phase, t) for t in spec['transforms']])
-    return spec
 
   if known_transforms:
     known_transforms = set(known_transforms).union(['chain', 'composite'])
@@ -935,7 +1299,7 @@ def preprocess(spec, verbose=False, known_transforms=None):
       # lift_config,
       ensure_config,
   ]:
-    spec = apply(phase, spec)
+    spec = apply_phase(phase, spec)
     if verbose:
       print('=' * 20, phase, '=' * 20)
       pprint.pprint(spec)
@@ -1023,7 +1387,12 @@ def expand_pipeline(
     pipeline,
     pipeline_spec,
     providers=None,
-    validate_schema='generic' if jsonschema is not None else None):
+    validate_schema='generic' if jsonschema is not None else None,
+    pipeline_path=''):
+  if isinstance(pipeline, beam.pvalue.PBegin):
+    root = pipeline
+  else:
+    root = beam.pvalue.PBegin(pipeline)
   if isinstance(pipeline_spec, str):
     pipeline_spec = yaml.load(pipeline_spec, Loader=SafeLineLoader)
   # TODO(robertwb): It's unclear whether this gives as good of errors, but
@@ -1034,5 +1403,6 @@ def expand_pipeline(
   return YamlTransform(
       pipeline_as_composite(pipeline_spec['pipeline']),
       yaml_provider.merge_providers(
-          yaml_provider.parse_providers(pipeline_spec.get('providers', [])),
-          providers or {})).expand(beam.pvalue.PBegin(pipeline))
+          yaml_provider.parse_providers(
+              pipeline_path, pipeline_spec.get('providers', [])),
+          providers or {})).expand(root)

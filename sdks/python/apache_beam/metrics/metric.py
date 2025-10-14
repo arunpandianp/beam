@@ -195,6 +195,7 @@ class MetricResults(object):
   GAUGES = "gauges"
   STRINGSETS = "string_sets"
   BOUNDED_TRIES = "bounded_tries"
+  HISTOGRAMS = "histograms"
 
   @staticmethod
   def _matches_name(filter: 'MetricsFilter', metric_key: 'MetricKey') -> bool:
@@ -339,8 +340,8 @@ class Lineage:
   for lineage tracking."""
 
   LINEAGE_NAMESPACE = "lineage"
-  SOURCE = "sources"
-  SINK = "sinks"
+  SOURCE = "sources_v2"
+  SINK = "sinks_v2"
 
   _METRICS = {
       SOURCE: Metrics.bounded_trie(LINEAGE_NAMESPACE, SOURCE),

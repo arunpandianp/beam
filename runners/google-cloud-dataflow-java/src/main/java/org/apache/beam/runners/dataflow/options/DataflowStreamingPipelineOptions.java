@@ -136,6 +136,12 @@ public interface DataflowStreamingPipelineOptions extends PipelineOptions {
 
   void setUseSeparateWindmillHeartbeatStreams(Boolean value);
 
+  @Description("If true, GetWorkStreams will request multiple work items in a response chunk.")
+  @Default.Boolean(true)
+  boolean getWindmillRequestBatchedGetWorkResponse();
+
+  void setWindmillRequestBatchedGetWorkResponse(boolean value);
+
   @Description("The number of streams to use for GetData requests.")
   @Default.Integer(1)
   int getWindmillGetDataStreamCount();
@@ -312,6 +318,9 @@ public interface DataflowStreamingPipelineOptions extends PipelineOptions {
   class EnableWindmillServiceDirectPathFactory implements DefaultValueFactory<Boolean> {
     @Override
     public Boolean create(PipelineOptions options) {
+      if (ExperimentalOptions.hasExperiment(options, "disable_windmill_service_direct_path")) {
+        return false;
+      }
       return ExperimentalOptions.hasExperiment(options, "enable_windmill_service_direct_path");
     }
   }

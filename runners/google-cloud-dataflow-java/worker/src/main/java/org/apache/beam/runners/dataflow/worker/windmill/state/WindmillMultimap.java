@@ -17,8 +17,6 @@
  */
 package org.apache.beam.runners.dataflow.worker.windmill.state;
 
-import static org.apache.beam.runners.dataflow.worker.windmill.state.WindmillStateUtil.encodeKey;
-
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.AbstractMap;
@@ -40,7 +38,7 @@ import org.apache.beam.sdk.state.MultimapState;
 import org.apache.beam.sdk.state.ReadableState;
 import org.apache.beam.sdk.util.ByteStringOutputStream;
 import org.apache.beam.sdk.util.Weighted;
-import org.apache.beam.vendor.grpc.v1p60p1.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterators;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
@@ -80,10 +78,11 @@ public class WindmillMultimap<K, V> extends SimpleWindmillState implements Multi
       String stateFamily,
       Coder<K> keyCoder,
       Coder<V> valueCoder,
-      boolean isNewShardingKey) {
+      boolean isNewShardingKey,
+      WindmillStateTagUtil windmillStateTagUtil) {
     this.namespace = namespace;
     this.address = address;
-    this.stateKey = encodeKey(namespace, address);
+    this.stateKey = windmillStateTagUtil.encodeKey(namespace, address);
     this.stateFamily = stateFamily;
     this.keyCoder = keyCoder;
     this.valueCoder = valueCoder;

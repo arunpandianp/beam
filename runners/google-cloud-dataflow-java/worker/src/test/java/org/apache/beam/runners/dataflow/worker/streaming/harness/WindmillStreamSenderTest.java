@@ -36,12 +36,11 @@ import org.apache.beam.runners.dataflow.worker.windmill.client.WindmillStream.Ge
 import org.apache.beam.runners.dataflow.worker.windmill.client.commits.WorkCommitter;
 import org.apache.beam.runners.dataflow.worker.windmill.client.getdata.GetDataClient;
 import org.apache.beam.runners.dataflow.worker.windmill.client.grpc.GrpcWindmillStreamFactory;
-import org.apache.beam.runners.dataflow.worker.windmill.client.throttling.ThrottleTimer;
 import org.apache.beam.runners.dataflow.worker.windmill.work.WorkItemScheduler;
 import org.apache.beam.runners.dataflow.worker.windmill.work.budget.GetWorkBudget;
-import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.ManagedChannel;
-import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.inprocess.InProcessChannelBuilder;
-import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.testing.GrpcCleanupRule;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.ManagedChannel;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.inprocess.InProcessChannelBuilder;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.testing.GrpcCleanupRule;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
@@ -65,7 +64,11 @@ public class WindmillStreamSenderTest {
                       .build())
               .build());
   private final WorkItemScheduler workItemScheduler =
-      (workItem, watermarks, processingContext, getWorkStreamLatencies) -> {};
+      (workItem,
+          serializedWorkItemSize,
+          watermarks,
+          processingContext,
+          getWorkStreamLatencies) -> {};
   @Rule public transient Timeout globalTimeout = Timeout.seconds(600);
   private ManagedChannel inProcessChannel;
   private WindmillConnection connection;
@@ -78,7 +81,7 @@ public class WindmillStreamSenderTest {
     grpcCleanup.register(inProcessChannel);
     connection =
         WindmillConnection.builder()
-            .setStub(CloudWindmillServiceV1Alpha1Grpc.newStub(inProcessChannel))
+            .setStubSupplier(() -> CloudWindmillServiceV1Alpha1Grpc.newStub(inProcessChannel))
             .build();
   }
 
@@ -107,14 +110,13 @@ public class WindmillStreamSenderTest {
                     .setMaxItems(itemBudget)
                     .setMaxBytes(byteBudget)
                     .build()),
-            any(ThrottleTimer.class),
             any(),
             any(),
             any(),
             eq(workItemScheduler));
 
-    verify(streamFactory).createDirectGetDataStream(eq(connection), any(ThrottleTimer.class));
-    verify(streamFactory).createDirectCommitWorkStream(eq(connection), any(ThrottleTimer.class));
+    verify(streamFactory).createDirectGetDataStream(eq(connection));
+    verify(streamFactory).createDirectCommitWorkStream(eq(connection));
   }
 
   @Test
@@ -139,16 +141,13 @@ public class WindmillStreamSenderTest {
                     .setMaxItems(itemBudget)
                     .setMaxBytes(byteBudget)
                     .build()),
-            any(ThrottleTimer.class),
             any(),
             any(),
             any(),
             eq(workItemScheduler));
 
-    verify(streamFactory, times(1))
-        .createDirectGetDataStream(eq(connection), any(ThrottleTimer.class));
-    verify(streamFactory, times(1))
-        .createDirectCommitWorkStream(eq(connection), any(ThrottleTimer.class));
+    verify(streamFactory, times(1)).createDirectGetDataStream(eq(connection));
+    verify(streamFactory, times(1)).createDirectCommitWorkStream(eq(connection));
   }
 
   @Test
@@ -176,16 +175,13 @@ public class WindmillStreamSenderTest {
                     .setMaxItems(itemBudget)
                     .setMaxBytes(byteBudget)
                     .build()),
-            any(ThrottleTimer.class),
             any(),
             any(),
             any(),
             eq(workItemScheduler));
 
-    verify(streamFactory, times(1))
-        .createDirectGetDataStream(eq(connection), any(ThrottleTimer.class));
-    verify(streamFactory, times(1))
-        .createDirectCommitWorkStream(eq(connection), any(ThrottleTimer.class));
+    verify(streamFactory, times(1)).createDirectGetDataStream(eq(connection));
+    verify(streamFactory, times(1)).createDirectCommitWorkStream(eq(connection));
   }
 
   @Test
@@ -202,16 +198,14 @@ public class WindmillStreamSenderTest {
     when(mockStreamFactory.createDirectGetWorkStream(
             eq(connection),
             eq(getWorkRequestWithBudget),
-            any(ThrottleTimer.class),
             any(),
             any(),
             any(),
             eq(workItemScheduler)))
         .thenReturn(mockGetWorkStream);
 
-    when(mockStreamFactory.createDirectGetDataStream(eq(connection), any(ThrottleTimer.class)))
-        .thenReturn(mockGetDataStream);
-    when(mockStreamFactory.createDirectCommitWorkStream(eq(connection), any(ThrottleTimer.class)))
+    when(mockStreamFactory.createDirectGetDataStream(eq(connection))).thenReturn(mockGetDataStream);
+    when(mockStreamFactory.createDirectCommitWorkStream(eq(connection)))
         .thenReturn(mockCommitWorkStream);
 
     WindmillStreamSender windmillStreamSender =
@@ -241,16 +235,14 @@ public class WindmillStreamSenderTest {
     when(mockStreamFactory.createDirectGetWorkStream(
             eq(connection),
             eq(getWorkRequestWithBudget),
-            any(ThrottleTimer.class),
             any(),
             any(),
             any(),
             eq(workItemScheduler)))
         .thenReturn(mockGetWorkStream);
 
-    when(mockStreamFactory.createDirectGetDataStream(eq(connection), any(ThrottleTimer.class)))
-        .thenReturn(mockGetDataStream);
-    when(mockStreamFactory.createDirectCommitWorkStream(eq(connection), any(ThrottleTimer.class)))
+    when(mockStreamFactory.createDirectGetDataStream(eq(connection))).thenReturn(mockGetDataStream);
+    when(mockStreamFactory.createDirectCommitWorkStream(eq(connection)))
         .thenReturn(mockCommitWorkStream);
 
     WindmillStreamSender windmillStreamSender =

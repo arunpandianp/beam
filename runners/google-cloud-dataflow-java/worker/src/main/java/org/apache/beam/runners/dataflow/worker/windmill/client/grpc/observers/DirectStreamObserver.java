@@ -23,8 +23,8 @@ import java.util.concurrent.TimeoutException;
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 import org.apache.beam.runners.dataflow.worker.windmill.WindmillServerStub.WindmillRpcException;
-import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.stub.CallStreamObserver;
-import org.apache.beam.vendor.grpc.v1p60p1.io.grpc.stub.StreamObserver;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.CallStreamObserver;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -182,8 +182,8 @@ final class DirectStreamObserver<T> implements TerminatingStreamObserver<T> {
       Preconditions.checkState(!isUserClosed);
       isUserClosed = true;
       if (!isOutboundObserverClosed) {
-        outboundObserver.onError(t);
         isOutboundObserverClosed = true;
+        outboundObserver.onError(t);
       }
     }
   }

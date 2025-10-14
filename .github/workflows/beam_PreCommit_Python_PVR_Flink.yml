@@ -23,12 +23,10 @@ on:
       - 'sdks/python/**'
       - 'release/**'
       - 'sdks/java/io/kafka/**'
-      - 'runners/core-construction-java/**'
       - 'runners/core-java/**'
       - 'runners/extensions-java/**'
       - 'runners/flink/**'
       - 'runners/java-fn-execution/**'
-      - 'runners/reference/**'
       - 'release/trigger_all_tests.json'
       - '.github/trigger_files/beam_PreCommit_Python_PVR_Flink.json'
   issue_comment:
@@ -41,12 +39,10 @@ on:
       - 'sdks/python/**'
       - 'release/**'
       - 'sdks/java/io/kafka/**'
-      - 'runners/core-construction-java/**'
       - 'runners/core-java/**'
       - 'runners/extensions-java/**'
       - 'runners/flink/**'
       - 'runners/java-fn-execution/**'
-      - 'runners/reference/**'
       - '.github/workflows/beam_PreCommit_Python_PVR_Flink.yml'
   schedule:
     - cron: '45 2/6 * * *'
@@ -74,7 +70,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DEVELOCITY_ACCESS_KEY: ${{ secrets.GE_ACCESS_TOKEN }}
+  DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
   GRADLE_ENTERPRISE_CACHE_USERNAME: ${{ secrets.GE_CACHE_USERNAME }}
   GRADLE_ENTERPRISE_CACHE_PASSWORD: ${{ secrets.GE_CACHE_PASSWORD }}
 
@@ -104,15 +100,15 @@ jobs:
       - name: Setup environment
         uses: ./.github/actions/setup-environment-action
         with:
-          python-version: 3.12
+          python-version: 3.13
       - name: run Python PVR Flink PreCommit script
         uses: ./.github/actions/gradle-command-self-hosted-action
         env:
           CLOUDSDK_CONFIG: ${{ env.KUBELET_GCLOUD_CONFIG_PATH}}
         with:
-          gradle-command: :sdks:python:test-suites:portable:py312:flinkValidatesRunner
+          gradle-command: :sdks:python:test-suites:portable:py313:flinkValidatesRunner
           arguments: |
-            -PpythonVersion=3.12 \
+            -PpythonVersion=3.13 \
       - name: Archive Python Test Results
         uses: actions/upload-artifact@v4
         if: failure()

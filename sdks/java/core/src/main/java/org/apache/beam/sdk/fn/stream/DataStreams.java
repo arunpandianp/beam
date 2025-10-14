@@ -29,7 +29,7 @@ import java.util.NoSuchElementException;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.fn.data.WeightedList;
 import org.apache.beam.sdk.util.ByteStringOutputStream;
-import org.apache.beam.vendor.grpc.v1p60p1.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
 
 /**
  * {@link DataStreamDecoder} treats multiple {@link ByteString}s as a single input stream decoding
@@ -214,7 +214,7 @@ public class DataStreams {
         long elementOverhead = rvals.size() * BYTES_LIST_ELEMENT_OVERHEAD;
         long totalWeight = byteString.size() + elementOverhead;
 
-        return new WeightedList<>(rvals, totalWeight);
+        return WeightedList.of(rvals, totalWeight);
       } catch (IOException e) {
         throw new IllegalStateException(e);
       }

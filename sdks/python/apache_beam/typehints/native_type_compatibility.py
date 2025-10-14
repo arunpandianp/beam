@@ -25,8 +25,17 @@ import logging
 import sys
 import types
 import typing
+from typing import Generic
+from typing import TypeVar
 
 from apache_beam.typehints import typehints
+
+try:
+  from typing import is_typeddict
+except ImportError:
+  from typing_extensions import is_typeddict
+
+T = TypeVar('T')
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,7 +70,11 @@ _CONVERTED_COLLECTIONS = [
     collections.abc.Set,
     collections.abc.MutableSet,
     collections.abc.Collection,
+    collections.abc.Sequence,
+    collections.abc.Mapping,
 ]
+
+_CONVERTED_MODULES = ('typing', 'collections', 'collections.abc')
 
 
 def _get_args(typ):
@@ -122,6 +135,10 @@ def _match_is_primitive(match_against):
   return lambda user_type: _is_primitive(user_type, match_against)
 
 
+def _match_is_dict(user_type):
+  return _is_primitive(user_type, dict) or _safe_issubclass(user_type, dict)
+
+
 def _match_is_exactly_mapping(user_type):
   # Avoid unintentionally catching all subtypes (e.g. strings and mappings).
   expected_origin = collections.abc.Mapping
@@ -140,10 +157,14 @@ def _match_is_exactly_collection(user_type):
   return getattr(user_type, '__origin__', None) is collections.abc.Collection
 
 
+def _match_is_exactly_sequence(user_type):
+  return getattr(user_type, '__origin__', None) is collections.abc.Sequence
+
+
 def match_is_named_tuple(user_type):
   return (
       _safe_issubclass(user_type, typing.Tuple) and
-      hasattr(user_type, '__annotations__'))
+      hasattr(user_type, '__annotations__') and hasattr(user_type, '_fields'))
 
 
 def _match_is_optional(user_type):
@@ -277,6 +298,18 @@ def is_builtin(typ):
   return getattr(typ, '__origin__', None) in _BUILTINS
 
 
+# During type inference of WindowedValue, we need to pass in the inner value
+# type. This cannot be achieved immediately with WindowedValue class because it
+# is not parameterized. Changing it to a generic class (e.g. WindowedValue[T])
+# could work in theory. However, the class is cythonized and it seems that
+# cython does not handle generic classes well.
+# The workaround here is to create a separate class solely for the type
+# inference purpose. This class should never be used for creating instances.
+class TypedWindowedValue(Generic[T]):
+  def __init__(self, *args, **kwargs):
+    raise NotImplementedError("This class is solely for type inference")
+
+
 def convert_to_beam_type(typ):
   """Convert a given typing type to a Beam type.
 
@@ -331,13 +364,15 @@ def convert_to_beam_type(typ):
     # to the correct type constraint in Beam
     # This is needed to fix https://github.com/apache/beam/issues/33356
     pass
-
-  elif (typ_module != 'typing') and (typ_module !=
-                                     'collections.abc') and not is_builtin(typ):
+  elif is_typeddict(typ):
+    # Special-case for the TypedDict constructor, which is not actually a type,
+    # and therefore fails to be recognised as compatible with Dict or Mapping.
+    return typehints.Dict[str, typehints.Any]
+  elif typ_module not in _CONVERTED_MODULES and not is_builtin(typ):
     # Only translate primitives and types from collections.abc and typing.
     return typ
   if (typ_module == 'collections.abc' and
-      typ.__origin__ not in _CONVERTED_COLLECTIONS):
+      getattr(typ, '__origin__', typ) not in _CONVERTED_COLLECTIONS):
     # TODO(https://github.com/apache/beam/issues/29135):
     # Support more collections types
     return typ
@@ -350,8 +385,7 @@ def convert_to_beam_type(typ):
       # unsupported.
       _TypeMapEntry(match=is_forward_ref, arity=0, beam_type=typehints.Any),
       _TypeMapEntry(match=is_any, arity=0, beam_type=typehints.Any),
-      _TypeMapEntry(
-          match=_match_is_primitive(dict), arity=2, beam_type=typehints.Dict),
+      _TypeMapEntry(match=_match_is_dict, arity=2, beam_type=typehints.Dict),
       _TypeMapEntry(
           match=_match_is_exactly_iterable,
           arity=1,
@@ -385,6 +419,17 @@ def convert_to_beam_type(typ):
           match=_match_is_exactly_collection,
           arity=1,
           beam_type=typehints.Collection),
+      _TypeMapEntry(
+          match=_match_issubclass(TypedWindowedValue),
+          arity=1,
+          beam_type=typehints.WindowedValue),
+      _TypeMapEntry(
+          match=_match_is_exactly_sequence,
+          arity=1,
+          beam_type=typehints.Sequence),
+      _TypeMapEntry(
+          match=_match_is_exactly_mapping, arity=2,
+          beam_type=typehints.Mapping),
   ]
 
   # Find the first matching entry.
@@ -415,6 +460,14 @@ def convert_to_beam_type(typ):
       args = (typehints.TypeVariable('T'), ) * arity
   elif matched_entry.arity == -1:
     arity = len_args
+  # Counters are special dict types that are implicitly parameterized to
+  # [T, int], so we fix cases where they only have one argument to match
+  # a more traditional dict hint.
+  elif len_args == 1 and _safe_issubclass(getattr(typ, '__origin__', typ),
+                                          collections.Counter):
+    args = (args[0], int)
+    len_args = 2
+    arity = matched_entry.arity
   else:
     arity = matched_entry.arity
     if len_args != arity:
@@ -449,8 +502,8 @@ def convert_to_beam_types(args):
     return [convert_to_beam_type(v) for v in args]
 
 
-def convert_to_typing_type(typ):
-  """Converts a given Beam type to a typing type.
+def convert_to_python_type(typ):
+  """Converts a given Beam type to a python type.
 
   This is the reverse of convert_to_beam_type.
 
@@ -482,33 +535,38 @@ def convert_to_typing_type(typ):
   if isinstance(typ, typehints.AnyTypeConstraint):
     return typing.Any
   if isinstance(typ, typehints.DictConstraint):
-    return typing.Dict[convert_to_typing_type(typ.key_type),
-                       convert_to_typing_type(typ.value_type)]
+    return dict[convert_to_python_type(typ.key_type),
+                convert_to_python_type(typ.value_type)]
   if isinstance(typ, typehints.ListConstraint):
-    return typing.List[convert_to_typing_type(typ.inner_type)]
+    return list[convert_to_python_type(typ.inner_type)]
   if isinstance(typ, typehints.IterableTypeConstraint):
-    return typing.Iterable[convert_to_typing_type(typ.inner_type)]
+    return collections.abc.Iterable[convert_to_python_type(typ.inner_type)]
   if isinstance(typ, typehints.UnionConstraint):
     if not typ.union_types:
       # Gracefully handle the empty union type.
       return typing.Any
-    return typing.Union[tuple(convert_to_typing_types(typ.union_types))]
+    return typing.Union[tuple(convert_to_python_types(typ.union_types))]
   if isinstance(typ, typehints.SetTypeConstraint):
-    return typing.Set[convert_to_typing_type(typ.inner_type)]
+    return set[convert_to_python_type(typ.inner_type)]
   if isinstance(typ, typehints.FrozenSetTypeConstraint):
-    return typing.FrozenSet[convert_to_typing_type(typ.inner_type)]
+    return frozenset[convert_to_python_type(typ.inner_type)]
   if isinstance(typ, typehints.TupleConstraint):
-    return typing.Tuple[tuple(convert_to_typing_types(typ.tuple_types))]
+    return tuple[tuple(convert_to_python_types(typ.tuple_types))]
   if isinstance(typ, typehints.TupleSequenceConstraint):
-    return typing.Tuple[convert_to_typing_type(typ.inner_type), ...]
+    return tuple[convert_to_python_type(typ.inner_type), ...]
+  if isinstance(typ, typehints.ABCSequenceTypeConstraint):
+    return collections.abc.Sequence[convert_to_python_type(typ.inner_type)]
   if isinstance(typ, typehints.IteratorTypeConstraint):
-    return typing.Iterator[convert_to_typing_type(typ.yielded_type)]
+    return collections.abc.Iterator[convert_to_python_type(typ.yielded_type)]
+  if isinstance(typ, typehints.MappingTypeConstraint):
+    return collections.abc.Mapping[convert_to_python_type(typ.key_type),
+                                   convert_to_python_type(typ.value_type)]
 
   raise ValueError('Failed to convert Beam type: %s' % typ)
 
 
-def convert_to_typing_types(args):
-  """Convert the given list or dictionary of args to typing types.
+def convert_to_python_types(args):
+  """Convert the given list or dictionary of args to python types.
 
   Args:
     args: Either an iterable of types, or a dictionary where the values are
@@ -519,6 +577,6 @@ def convert_to_typing_types(args):
     a dictionary with the same keys, and values which have been converted.
   """
   if isinstance(args, dict):
-    return {k: convert_to_typing_type(v) for k, v in args.items()}
+    return {k: convert_to_python_type(v) for k, v in args.items()}
   else:
-    return [convert_to_typing_type(v) for v in args]
+    return [convert_to_python_type(v) for v in args]

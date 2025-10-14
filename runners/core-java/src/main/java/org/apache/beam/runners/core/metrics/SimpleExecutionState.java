@@ -25,7 +25,7 @@ import java.util.HashMap;
 import java.util.Map;
 import org.apache.beam.model.pipeline.v1.MetricsApi.MonitoringInfo;
 import org.apache.beam.runners.core.metrics.ExecutionStateTracker.ExecutionState;
-import org.apache.beam.vendor.grpc.v1p60p1.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.joda.time.Duration;
 import org.joda.time.format.PeriodFormatter;
@@ -65,7 +65,7 @@ public class SimpleExecutionState extends ExecutionState {
 
   /**
    * @param stateName A state name to be used in lull logging when stuck in a state.
-   * @param urn A optional string urn for an execution time metric.
+   * @param urn An optional string urn for an execution time metric.
    * @param labelsMetadata arbitrary metadata to use for reporting purposes.
    */
   public SimpleExecutionState(

@@ -43,7 +43,6 @@ import org.apache.beam.it.common.PipelineOperator;
 import org.apache.beam.it.common.TestProperties;
 import org.apache.beam.it.gcp.IOLoadTestBase;
 import org.apache.beam.runners.dataflow.DataflowRunner;
-import org.apache.beam.sdk.extensions.gcp.options.GcpOptions;
 import org.apache.beam.sdk.io.GenerateSequence;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryOptions;
@@ -133,7 +132,7 @@ public class BigQueryStreamingLT extends IOLoadTestBase {
     String expectedTable =
         TestProperties.getProperty("expectedTable", "", TestProperties.Type.PROPERTY);
     if (!Strings.isNullOrEmpty(expectedTable)) {
-      config.toBuilder().setExpectedTable(expectedTable).build();
+      config = config.toBuilder().setExpectedTable(expectedTable).build();
     }
 
     crashIntervalSeconds =
@@ -361,7 +360,7 @@ public class BigQueryStreamingLT extends IOLoadTestBase {
               .setPipeline(storageApiPipeline)
               .addParameter("runner", config.getRunner())
               .addParameter("streaming", "true")
-              .addParameter("experiments", GcpOptions.STREAMING_ENGINE_EXPERIMENT)
+              .addParameter("experiments", "use_runner_v2")
               .addParameter(
                   "maxNumWorkers",
                   TestProperties.getProperty("maxNumWorkers", "10", TestProperties.Type.PROPERTY))
@@ -376,7 +375,7 @@ public class BigQueryStreamingLT extends IOLoadTestBase {
                   .setJobId(storageApiInfo.jobId())
                   .setProject(project)
                   .setRegion(region)
-                  .setTimeoutAfter(java.time.Duration.ofMinutes(config.getMinutes() * 2L))
+                  .setTimeoutAfter(java.time.Duration.ofMinutes(config.getMinutes() * 4L))
                   .setCheckAfter(java.time.Duration.ofSeconds(config.getMinutes() * 60 / 20))
                   .build());
       // Check the initial launch didn't fail
@@ -397,7 +396,7 @@ public class BigQueryStreamingLT extends IOLoadTestBase {
       } catch (Exception e) {
         // Just log the error. Don't re-throw because we have accuracy checks that are more
         // important below
-        LOG.error("Encountered an error while exporting metrics to BigQuery:\n{}", e);
+        LOG.error("Encountered an error while exporting metrics to BigQuery:", e);
       }
     }
     // If we're not publishing metrics, just run the pipeline normally
@@ -493,7 +492,7 @@ public class BigQueryStreamingLT extends IOLoadTestBase {
             "WITH \n"
                 + "storage_api_table AS (SELECT %s FROM `%s`), \n"
                 + "expected_table AS (SELECT %s FROM `%s`), \n"
-                + "rows_mismatched AS (SELECT * FROM expected_table EXCEPT DISTINCT SELECT * FROM storage_api_table) \n"
+                + "rows_mismatched AS (SELECT * FROM storage_api_table EXCEPT DISTINCT SELECT * FROM expected_table) \n"
                 + "SELECT COUNT(*) FROM rows_mismatched",
             columnNames, destTable, columnNames, expectedTable);
 
@@ -501,7 +500,7 @@ public class BigQueryStreamingLT extends IOLoadTestBase {
 
     TableRow queryResponse =
         Iterables.getOnlyElement(
-            BQ_CLIENT.queryUnflattened(checkCorrectnessQuery, "google.com:clouddfe", true, true));
+            BQ_CLIENT.queryUnflattened(checkCorrectnessQuery, project, true, true));
     long result = Long.parseLong((String) queryResponse.get("f0_"));
 
     LOG.info("Number of mismatched rows: {}", result);
@@ -522,7 +521,7 @@ public class BigQueryStreamingLT extends IOLoadTestBase {
 
     TableRow queryResponse =
         Iterables.getOnlyElement(
-            BQ_CLIENT.queryUnflattened(checkDuplicationQuery, "google.com:clouddfe", true, true));
+            BQ_CLIENT.queryUnflattened(checkDuplicationQuery, project, true, true));
     long actualCount = Long.parseLong((String) queryResponse.get("actualCount"));
     long expectedCount = Long.parseLong((String) queryResponse.get("expectedCount"));
     assertEquals(

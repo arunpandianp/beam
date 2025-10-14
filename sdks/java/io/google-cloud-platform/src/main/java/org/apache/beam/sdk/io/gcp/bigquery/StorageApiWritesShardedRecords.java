@@ -182,11 +182,11 @@ public class StorageApiWritesShardedRecords<DestinationT extends @NonNull Object
     }
   };
 
-  private static final Cache<ShardedKey<?>, AppendClientInfo> APPEND_CLIENTS =
+  private static final Cache<KV<String, ShardedKey<?>>, AppendClientInfo> APPEND_CLIENTS =
       CacheBuilder.newBuilder()
           .expireAfterAccess(5, TimeUnit.MINUTES)
           .removalListener(
-              (RemovalNotification<ShardedKey<?>, AppendClientInfo> removal) -> {
+              (RemovalNotification<KV<String, ShardedKey<?>>, AppendClientInfo> removal) -> {
                 final @Nullable AppendClientInfo appendClientInfo = removal.getValue();
                 if (appendClientInfo != null) {
                   appendClientInfo.close();
@@ -531,6 +531,28 @@ public class StorageApiWritesShardedRecords<DestinationT extends @NonNull Object
                       element.getKey().getKey(), dynamicDestinations, datasetService);
               tableSchema = converter.getTableSchema();
               descriptor = converter.getDescriptor(false);
+
+              if (autoUpdateSchema) {
+                // A StreamWriter ignores table schema updates that happen prior to its creation.
+                // So before creating a StreamWriter below, we fetch the table schema to check if we
+                // missed an update.
+                // If so, use the new schema instead of the base schema
+                @Nullable
+                TableSchema streamSchema =
+                    MoreObjects.firstNonNull(
+                        writeStreamService.getWriteStreamSchema(getOrCreateStream.get()),
+                        TableSchema.getDefaultInstance());
+                Optional<TableSchema> newSchema =
+                    TableSchemaUpdateUtils.getUpdatedSchema(tableSchema, streamSchema);
+
+                if (newSchema.isPresent()) {
+                  tableSchema = newSchema.get();
+                  descriptor =
+                      TableRowToStorageApiProto.descriptorSchemaFromTableSchema(
+                          tableSchema, true, false);
+                  updatedSchema.write(tableSchema);
+                }
+              }
             }
             AppendClientInfo info =
                 AppendClientInfo.of(
@@ -558,14 +580,18 @@ public class StorageApiWritesShardedRecords<DestinationT extends @NonNull Object
           };
 
       AtomicReference<AppendClientInfo> appendClientInfo =
-          new AtomicReference<>(APPEND_CLIENTS.get(element.getKey(), getAppendClientInfo));
+          new AtomicReference<>(
+              APPEND_CLIENTS.get(
+                  messageConverters.getAppendClientKey(element.getKey()), getAppendClientInfo));
       String currentStream = getOrCreateStream.get();
       if (!currentStream.equals(appendClientInfo.get().getStreamName())) {
         // Cached append client is inconsistent with persisted state. Throw away cached item and
         // force it to be
         // recreated.
-        APPEND_CLIENTS.invalidate(element.getKey());
-        appendClientInfo.set(APPEND_CLIENTS.get(element.getKey(), getAppendClientInfo));
+        APPEND_CLIENTS.invalidate(messageConverters.getAppendClientKey(element.getKey()));
+        appendClientInfo.set(
+            APPEND_CLIENTS.get(
+                messageConverters.getAppendClientKey(element.getKey()), getAppendClientInfo));
       }
 
       TableSchema updatedSchemaValue = updatedSchema.read();
@@ -574,8 +600,9 @@ public class StorageApiWritesShardedRecords<DestinationT extends @NonNull Object
           appendClientInfo.set(
               AppendClientInfo.of(
                   updatedSchemaValue, appendClientInfo.get().getCloseAppendClient(), false));
-          APPEND_CLIENTS.invalidate(element.getKey());
-          APPEND_CLIENTS.put(element.getKey(), appendClientInfo.get());
+          APPEND_CLIENTS.invalidate(messageConverters.getAppendClientKey(element.getKey()));
+          APPEND_CLIENTS.put(
+              messageConverters.getAppendClientKey(element.getKey()), appendClientInfo.get());
         }
       }
 
@@ -642,9 +669,10 @@ public class StorageApiWritesShardedRecords<DestinationT extends @NonNull Object
 
       Consumer<Iterable<AppendRowsContext>> clearClients =
           contexts -> {
-            APPEND_CLIENTS.invalidate(element.getKey());
+            APPEND_CLIENTS.invalidate(messageConverters.getAppendClientKey(element.getKey()));
             appendClientInfo.set(appendClientInfo.get().withNoAppendClient());
-            APPEND_CLIENTS.put(element.getKey(), appendClientInfo.get());
+            APPEND_CLIENTS.put(
+                messageConverters.getAppendClientKey(element.getKey()), appendClientInfo.get());
             for (AppendRowsContext context : contexts) {
               if (context.client != null) {
                 // Unpin in a different thread, as it may execute a blocking close.
@@ -938,8 +966,9 @@ public class StorageApiWritesShardedRecords<DestinationT extends @NonNull Object
               appendClientInfo.set(
                   AppendClientInfo.of(
                       newSchema.get(), appendClientInfo.get().getCloseAppendClient(), false));
-              APPEND_CLIENTS.invalidate(element.getKey());
-              APPEND_CLIENTS.put(element.getKey(), appendClientInfo.get());
+              APPEND_CLIENTS.invalidate(messageConverters.getAppendClientKey(element.getKey()));
+              APPEND_CLIENTS.put(
+                  messageConverters.getAppendClientKey(element.getKey()), appendClientInfo.get());
               LOG.debug(
                   "Fetched updated schema for table {}:\n\t{}", tableId, updatedSchemaReturned);
               updatedSchema.write(newSchema.get());
@@ -971,7 +1000,7 @@ public class StorageApiWritesShardedRecords<DestinationT extends @NonNull Object
         streamName.clear();
         streamOffset.clear();
         // Make sure that the stream object is closed.
-        APPEND_CLIENTS.invalidate(key);
+        APPEND_CLIENTS.invalidate(messageConverters.getAppendClientKey(key));
       }
     }
 

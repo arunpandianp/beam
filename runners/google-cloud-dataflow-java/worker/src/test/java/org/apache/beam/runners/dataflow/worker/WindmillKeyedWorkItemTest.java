@@ -22,6 +22,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.Collections;
+import org.apache.beam.model.fnexecution.v1.BeamFnApi;
 import org.apache.beam.runners.core.KeyedWorkItem;
 import org.apache.beam.runners.core.StateNamespace;
 import org.apache.beam.runners.core.StateNamespaces;
@@ -39,8 +40,8 @@ import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo.Timing;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.vendor.grpc.v1p60p1.com.google.protobuf.ByteString;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
 import org.hamcrest.Matchers;
 import org.joda.time.Instant;
 import org.junit.Before;
@@ -97,9 +98,9 @@ public class WindmillKeyedWorkItemTest {
     assertThat(
         keyedWorkItem.elementsIterable(),
         Matchers.contains(
-            WindowedValue.of("hello", new Instant(5), WINDOW_1, paneInfo(0)),
-            WindowedValue.of("world", new Instant(7), WINDOW_2, paneInfo(2)),
-            WindowedValue.of("earth", new Instant(6), WINDOW_1, paneInfo(1))));
+            WindowedValues.of("hello", new Instant(5), WINDOW_1, paneInfo(0)),
+            WindowedValues.of("world", new Instant(7), WINDOW_2, paneInfo(2)),
+            WindowedValues.of("earth", new Instant(6), WINDOW_1, paneInfo(1))));
   }
 
   private void addElement(
@@ -110,7 +111,11 @@ public class WindmillKeyedWorkItemTest {
       PaneInfo pane)
       throws IOException {
     ByteString encodedMetadata =
-        WindmillSink.encodeMetadata(WINDOWS_CODER, Collections.singletonList(window), pane);
+        WindmillSink.encodeMetadata(
+            WINDOWS_CODER,
+            Collections.singletonList(window),
+            pane,
+            BeamFnApi.Elements.ElementMetadata.newBuilder().build());
     chunk
         .addMessagesBuilder()
         .setTimestamp(WindmillTimeUtils.harnessToWindmillTimestamp(new Instant(timestamp)))

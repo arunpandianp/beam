@@ -18,12 +18,14 @@
 package org.apache.beam.sdk.io.iceberg;
 
 import java.util.List;
+import java.util.Map;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.util.RowFilter;
 import org.apache.beam.sdk.util.RowStringInterpolator;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.ValueInSingleWindow;
 import org.apache.iceberg.FileFormat;
+import org.apache.iceberg.catalog.TableIdentifier;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 class PortableIcebergDestinations implements DynamicDestinations {
@@ -31,14 +33,21 @@ class PortableIcebergDestinations implements DynamicDestinations {
   private final RowStringInterpolator interpolator;
   private final String fileFormat;
 
+  private final @Nullable List<String> partitionFields;
+  private final @Nullable Map<String, String> tableProperties;
+
   public PortableIcebergDestinations(
       String destinationTemplate,
       String fileFormat,
       Schema inputSchema,
+      @Nullable List<String> partitionFields,
+      @Nullable Map<String, String> tableProperties,
       @Nullable List<String> fieldsToDrop,
       @Nullable List<String> fieldsToKeep,
       @Nullable String onlyField) {
-    interpolator = new RowStringInterpolator(destinationTemplate, inputSchema);
+    this.interpolator = new RowStringInterpolator(destinationTemplate, inputSchema);
+    this.partitionFields = partitionFields;
+    this.tableProperties = tableProperties;
     RowFilter rf = new RowFilter(inputSchema);
 
     if (fieldsToDrop != null) {
@@ -50,7 +59,7 @@ class PortableIcebergDestinations implements DynamicDestinations {
     if (onlyField != null) {
       rf = rf.only(onlyField);
     }
-    rowFilter = rf;
+    this.rowFilter = rf;
     this.fileFormat = fileFormat;
   }
 
@@ -72,8 +81,13 @@ class PortableIcebergDestinations implements DynamicDestinations {
   @Override
   public IcebergDestination instantiateDestination(String dest) {
     return IcebergDestination.builder()
-        .setTableIdentifier(IcebergUtils.parseTableIdentifier(dest))
-        .setTableCreateConfig(null)
+        .setTableIdentifier(TableIdentifier.parse(dest))
+        .setTableCreateConfig(
+            IcebergTableCreateConfig.builder()
+                .setSchema(getDataSchema())
+                .setPartitionFields(partitionFields)
+                .setTableProperties(tableProperties)
+                .build())
         .setFileFormat(FileFormat.fromString(fileFormat))
         .build();
   }

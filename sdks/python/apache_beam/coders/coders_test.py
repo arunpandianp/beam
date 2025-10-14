@@ -267,13 +267,19 @@ class NumpyIntAsKeyTest(unittest.TestCase):
     # this type is not supported as the key
     import numpy as np
 
-    with self.assertRaises(TypeError):
+    with self.assertRaisesRegex(Exception, "Unable to deterministically"):
       with TestPipeline() as p:
         indata = p | "Create" >> beam.Create([(a, int(a))
                                               for a in np.arange(3)])
 
         # Apply CombinePerkey to sum values for each key.
         _ = indata | "CombinePerKey" >> beam.CombinePerKey(sum)
+
+
+class WindowedValueCoderTest(unittest.TestCase):
+  def test_to_type_hint(self):
+    coder = coders.WindowedValueCoder(coders.VarIntCoder())
+    self.assertEqual(coder.to_type_hint(), typehints.WindowedValue[int])  # type: ignore[misc]
 
 
 if __name__ == '__main__':

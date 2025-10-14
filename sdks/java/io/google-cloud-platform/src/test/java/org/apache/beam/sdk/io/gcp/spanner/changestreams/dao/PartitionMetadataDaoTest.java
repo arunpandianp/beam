@@ -21,7 +21,6 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyObject;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -37,6 +36,8 @@ import com.google.cloud.spanner.Struct;
 import com.google.cloud.spanner.TransactionContext;
 import com.google.cloud.spanner.TransactionRunner;
 import com.google.cloud.spanner.Value;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Collections;
 import java.util.Map;
 import org.apache.beam.sdk.io.gcp.spanner.changestreams.model.PartitionMetadata;
@@ -97,13 +98,13 @@ public class PartitionMetadataDaoTest {
 
   @Test
   public void testInsert() {
-    when(databaseClient.readWriteTransaction(anyObject())).thenReturn(readWriteTransactionRunner);
+    when(databaseClient.readWriteTransaction(any())).thenReturn(readWriteTransactionRunner);
     when(databaseClient.readWriteTransaction()).thenReturn(readWriteTransactionRunner);
     when(readWriteTransactionRunner.run(any())).thenReturn(null);
     when(readWriteTransactionRunner.getCommitTimestamp())
         .thenReturn(Timestamp.ofTimeMicroseconds(1L));
     Timestamp commitTimestamp = partitionMetadataDao.insert(ROW);
-    verify(databaseClient, times(1)).readWriteTransaction(anyObject());
+    verify(databaseClient, times(1)).readWriteTransaction(any());
     verify(readWriteTransactionRunner, times(1)).run(any());
     verify(readWriteTransactionRunner, times(1)).getCommitTimestamp();
     assertEquals(Timestamp.ofTimeMicroseconds(1L), commitTimestamp);
@@ -145,7 +146,7 @@ public class PartitionMetadataDaoTest {
     ArgumentCaptor<ImmutableList<Mutation>> mutations =
         ArgumentCaptor.forClass(ImmutableList.class);
     ResultSet resultSet = mock(ResultSet.class);
-    when(transaction.executeQuery(any(), anyObject())).thenReturn(resultSet);
+    when(transaction.executeQuery(any(), any())).thenReturn(resultSet);
     when(resultSet.next()).thenReturn(false);
 
     doNothing().when(transaction).buffer(mutations.capture());
@@ -157,7 +158,7 @@ public class PartitionMetadataDaoTest {
   @Test
   public void testInTransactionContextUpdateToRunning() {
     ResultSet resultSet = mock(ResultSet.class);
-    when(transaction.executeQuery(any(), anyObject())).thenReturn(resultSet);
+    when(transaction.executeQuery(any(), any())).thenReturn(resultSet);
     when(resultSet.next()).thenReturn(true);
     when(resultSet.getString(any())).thenReturn(State.SCHEDULED.toString());
     when(resultSet.getCurrentRowAsStruct()).thenReturn(Struct.newBuilder().build());
@@ -180,7 +181,7 @@ public class PartitionMetadataDaoTest {
   public void testInTransactionContextCannotUpdateToScheduled() {
     System.out.println("Cannot update to scheduled");
     ResultSet resultSet = mock(ResultSet.class);
-    when(transaction.executeQuery(any(), anyObject())).thenReturn(resultSet);
+    when(transaction.executeQuery(any(), any())).thenReturn(resultSet);
     when(resultSet.next()).thenReturn(false);
 
     ArgumentCaptor<ImmutableList<Mutation>> mutations =
@@ -194,7 +195,7 @@ public class PartitionMetadataDaoTest {
   public void testInTransactionContextUpdateToScheduled() {
     System.out.println(" update to scheduled");
     ResultSet resultSet = mock(ResultSet.class);
-    when(transaction.executeQuery(any(), anyObject())).thenReturn(resultSet);
+    when(transaction.executeQuery(any(), any())).thenReturn(resultSet);
     when(resultSet.next()).thenReturn(true).thenReturn(false);
     when(resultSet.getString(any())).thenReturn(PARTITION_TOKEN);
     when(resultSet.getCurrentRowAsStruct()).thenReturn(Struct.newBuilder().build());
@@ -239,20 +240,45 @@ public class PartitionMetadataDaoTest {
   @Test
   public void testInTransactionContextUpdateWatermark() {
     ArgumentCaptor<Mutation> mutation = ArgumentCaptor.forClass(Mutation.class);
-    doNothing().when(transaction).buffer(mutation.capture());
-    assertNull(inTransactionContext.updateWatermark(PARTITION_TOKEN, WATERMARK));
+    when(transaction.readRow(any(), any(), any()))
+        .thenReturn(
+            Struct.newBuilder()
+                .set(PartitionMetadataAdminDao.COLUMN_WATERMARK)
+                .to(WATERMARK)
+                .build());
+    Instant largerWatermark = WATERMARK.toSqlTimestamp().toInstant().plus(Duration.ofSeconds(1));
+    assertNull(
+        inTransactionContext.updateWatermark(
+            PARTITION_TOKEN,
+            Timestamp.ofTimeSecondsAndNanos(
+                largerWatermark.getEpochSecond(), largerWatermark.getNano())));
+    verify(transaction).buffer(mutation.capture());
     Map<String, Value> mutationValueMap = mutation.getValue().asMap();
     assertEquals(
         PARTITION_TOKEN,
         mutationValueMap.get(PartitionMetadataAdminDao.COLUMN_PARTITION_TOKEN).getString());
     assertEquals(
-        WATERMARK, mutationValueMap.get(PartitionMetadataAdminDao.COLUMN_WATERMARK).getTimestamp());
+        Timestamp.ofTimeSecondsAndNanos(
+            largerWatermark.getEpochSecond(), largerWatermark.getNano()),
+        mutationValueMap.get(PartitionMetadataAdminDao.COLUMN_WATERMARK).getTimestamp());
+  }
+
+  @Test
+  public void testInTransactionContextDoNotUpdateWatermark() {
+    when(transaction.readRow(any(), any(), any()))
+        .thenReturn(
+            Struct.newBuilder()
+                .set(PartitionMetadataAdminDao.COLUMN_WATERMARK)
+                .to(WATERMARK)
+                .build());
+    assertNull(inTransactionContext.updateWatermark(PARTITION_TOKEN, WATERMARK));
+    verify(transaction, times(0)).buffer(any(Mutation.class));
   }
 
   @Test
   public void testInTransactionContextGetPartitionWithNoPartitions() {
     ResultSet resultSet = mock(ResultSet.class);
-    when(transaction.executeQuery(any(), anyObject())).thenReturn(resultSet);
+    when(transaction.executeQuery(any(), any())).thenReturn(resultSet);
     when(resultSet.next()).thenReturn(false);
     assertNull(inTransactionContext.getPartition(PARTITION_TOKEN));
   }
@@ -260,7 +286,7 @@ public class PartitionMetadataDaoTest {
   @Test
   public void testInTransactionContextGetPartitionWithPartitions() {
     ResultSet resultSet = mock(ResultSet.class);
-    when(transaction.executeQuery(any(), anyObject())).thenReturn(resultSet);
+    when(transaction.executeQuery(any(), any())).thenReturn(resultSet);
     when(resultSet.next()).thenReturn(true);
     when(resultSet.getCurrentRowAsStruct()).thenReturn(Struct.newBuilder().build());
     assertNotNull(inTransactionContext.getPartition(PARTITION_TOKEN));

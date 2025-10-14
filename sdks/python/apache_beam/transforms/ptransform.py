@@ -47,19 +47,15 @@ import os
 import sys
 import threading
 import warnings
+from collections.abc import Callable
+from collections.abc import Mapping
+from collections.abc import Sequence
 from functools import reduce
 from functools import wraps
 from typing import TYPE_CHECKING
 from typing import Any
-from typing import Callable
-from typing import Dict
 from typing import Generic
-from typing import List
-from typing import Mapping
 from typing import Optional
-from typing import Sequence
-from typing import Tuple
-from typing import Type
 from typing import TypeVar
 from typing import Union
 from typing import overload
@@ -149,7 +145,7 @@ class _SetInputPValues(_PValueishTransform):
 # in-process, in eager mode.  This cache allows the same _MaterializedResult
 # object to be accessed and used despite Runner API round-trip serialization.
 _pipeline_materialization_cache = {
-}  # type: Dict[Tuple[int, int], Dict[int, _MaterializedResult]]
+}  # type: dict[tuple[int, int], dict[int, _MaterializedResult]]
 _pipeline_materialization_lock = threading.Lock()
 
 
@@ -200,7 +196,7 @@ class _MaterializedResult(object):
     # type: (int, int) -> None
     self._pipeline_id = pipeline_id
     self._result_id = result_id
-    self.elements = []  # type: List[Any]
+    self.elements = []  # type: list[Any]
 
   def __reduce__(self):
     # When unpickled (during Runner API roundtrip serailization), get the
@@ -232,6 +228,9 @@ class _AddMaterializationTransforms(_PValueishTransform):
     from apache_beam import ParDo
 
     class _MaterializeValuesDoFn(DoFn):
+      def __init__(self):
+        self.is_materialize_values_do_fn = True
+
       def process(self, element):
         result.elements.append(element)
 
@@ -376,7 +375,7 @@ class PTransform(WithTypeHints, HasDisplayData, Generic[InputT, OutputT]):
     # type: () -> str
     return self.__class__.__name__
 
-  def annotations(self) -> Dict[str, Union[bytes, str, message.Message]]:
+  def annotations(self) -> dict[str, Union[bytes, str, message.Message]]:
     return {
         'python_type':  #
         f'{self.__class__.__module__}.{self.__class__.__qualname__}'
@@ -458,11 +457,11 @@ class PTransform(WithTypeHints, HasDisplayData, Generic[InputT, OutputT]):
     return self
 
   def get_resource_hints(self):
-    # type: () -> Dict[str, bytes]
+    # type: () -> dict[str, bytes]
     if '_resource_hints' not in self.__dict__:
       # PTransform subclasses don't always call super(), so prefer lazy
       # initialization. By default, transforms don't have any resource hints.
-      self._resource_hints = {}  # type: Dict[str, bytes]
+      self._resource_hints = {}  # type: dict[str, bytes]
     return self._resource_hints
 
   def type_check_inputs(self, pvalueish):
@@ -657,7 +656,7 @@ class PTransform(WithTypeHints, HasDisplayData, Generic[InputT, OutputT]):
       return input_dict
 
   def _named_inputs(self, main_inputs, side_inputs):
-    # type: (Mapping[str, pvalue.PValue], Sequence[Any]) -> Dict[str, pvalue.PValue]
+    # type: (Mapping[str, pvalue.PValue], Sequence[Any]) -> dict[str, pvalue.PValue]
 
     """Returns the dictionary of named inputs (including side inputs) as they
     should be named in the beam proto.
@@ -672,7 +671,7 @@ class PTransform(WithTypeHints, HasDisplayData, Generic[InputT, OutputT]):
     return dict(main_inputs, **named_side_inputs)
 
   def _named_outputs(self, outputs):
-    # type: (Dict[object, pvalue.PCollection]) -> Dict[str, pvalue.PCollection]
+    # type: (dict[object, pvalue.PCollection]) -> dict[str, pvalue.PCollection]
 
     """Returns the dictionary of named outputs as they should be named in the
     beam proto.
@@ -684,14 +683,14 @@ class PTransform(WithTypeHints, HasDisplayData, Generic[InputT, OutputT]):
         if isinstance(output, pvalue.PCollection)
     }
 
-  _known_urns = {}  # type: Dict[str, Tuple[Optional[type], ConstructorFn]]
+  _known_urns = {}  # type: dict[str, tuple[Optional[type], ConstructorFn]]
 
   @classmethod
   @overload
   def register_urn(
       cls,
       urn,  # type: str
-      parameter_type,  # type: Type[T]
+      parameter_type,  # type: type[T]
   ):
     # type: (...) -> Callable[[Union[type, Callable[[beam_runner_api_pb2.PTransform, T, PipelineContext], Any]]], Callable[[T, PipelineContext], Any]]
     pass
@@ -708,21 +707,23 @@ class PTransform(WithTypeHints, HasDisplayData, Generic[InputT, OutputT]):
 
   @classmethod
   @overload
-  def register_urn(cls,
-                   urn,  # type: str
-                   parameter_type,  # type: Type[T]
-                   constructor  # type: Callable[[beam_runner_api_pb2.PTransform, T, PipelineContext], Any]
-                  ):
+  def register_urn(
+      cls,
+      urn,  # type: str
+      parameter_type,  # type: type[T]
+      constructor  # type: Callable[[beam_runner_api_pb2.PTransform, T, PipelineContext], Any]
+  ):
     # type: (...) -> None
     pass
 
   @classmethod
   @overload
-  def register_urn(cls,
-                   urn,  # type: str
-                   parameter_type,  # type: None
-                   constructor  # type: Callable[[beam_runner_api_pb2.PTransform, bytes, PipelineContext], Any]
-                  ):
+  def register_urn(
+      cls,
+      urn,  # type: str
+      parameter_type,  # type: None
+      constructor  # type: Callable[[beam_runner_api_pb2.PTransform, bytes, PipelineContext], Any]
+  ):
     # type: (...) -> None
     pass
 
@@ -758,10 +759,11 @@ class PTransform(WithTypeHints, HasDisplayData, Generic[InputT, OutputT]):
         if isinstance(typed_param, str) else typed_param)
 
   @classmethod
-  def from_runner_api(cls,
-                      proto,  # type: Optional[beam_runner_api_pb2.PTransform]
-                      context  # type: PipelineContext
-                     ):
+  def from_runner_api(
+      cls,
+      proto,  # type: Optional[beam_runner_api_pb2.PTransform]
+      context  # type: PipelineContext
+  ):
     # type: (...) -> Optional[PTransform]
     if proto is None or proto.spec is None or not proto.spec.urn:
       return None
@@ -776,21 +778,28 @@ class PTransform(WithTypeHints, HasDisplayData, Generic[InputT, OutputT]):
       self,
       unused_context  # type: PipelineContext
   ):
-    # type: (...) -> Tuple[str, Optional[Union[message.Message, bytes, str]]]
+    # type: (...) -> tuple[str, Optional[Union[message.Message, bytes, str]]]
     # The payload here is just to ease debugging.
     return (
         python_urns.GENERIC_COMPOSITE_TRANSFORM,
         getattr(self, '_fn_api_payload', str(self)))
 
-  def to_runner_api_pickled(self, unused_context):
-    # type: (PipelineContext) -> Tuple[str, bytes]
-    return (python_urns.PICKLED_TRANSFORM, pickler.dumps(self))
+  def to_runner_api_pickled(self, context):
+    # type: (PipelineContext) -> tuple[str, bytes]
+    return (
+        python_urns.PICKLED_TRANSFORM,
+        pickler.dumps(
+            self,
+            enable_best_effort_determinism=context.
+            enable_best_effort_deterministic_pickling,
+        ),
+    )
 
   def runner_api_requires_keyed_input(self):
     return False
 
   def _add_type_constraint_from_consumer(self, full_label, input_type_hints):
-    # type: (str, Tuple[str, Any]) -> None
+    # type: (str, tuple[str, Any]) -> None
 
     """Adds a consumer transform's input type hints to our output type
     constraints, which is used during performance runtime type-checking.
@@ -993,6 +1002,7 @@ class _PTransformFnPTransform(PTransform):
     self._fn = fn
     self._args = args
     self._kwargs = kwargs
+    self._use_backwards_compatible_label = True
 
   def display_data(self):
     res = {
@@ -1021,11 +1031,30 @@ class _PTransformFnPTransform(PTransform):
       pass
     return self._fn(pcoll, *args, **kwargs)
 
-  def default_label(self):
+  def set_options(self, options):
+    # Avoid circular import.
+    from apache_beam.transforms.util import is_compat_version_prior_to
+    self._use_backwards_compatible_label = is_compat_version_prior_to(
+        options, '2.68.0')
+
+  def default_label(self) -> str:
+    # Attempt to give a reasonable name to this transform.
+    # We want it to be reasonably unique, but also not sensitive to
+    # irrelevent parameters to minimize pipeline-to-pipeline variance.
+    # For now, use only the first argument (if any), iff it would not make
+    # the name unwieldy.
     if self._args:
-      return '%s(%s)' % (
-          label_from_callable(self._fn), label_from_callable(self._args[0]))
-    return label_from_callable(self._fn)
+      first_arg_string = label_from_callable(self._args[0])
+      if (self._use_backwards_compatible_label or
+          not isinstance(first_arg_string, str) or len(first_arg_string) <= 19):
+        suffix = '(%s)' % first_arg_string
+      else:
+        suffix = ('(%s...%s)' %
+                  (first_arg_string[:10], first_arg_string[-6:])).replace(
+                      '\n', ' ')
+    else:
+      suffix = ''
+    return label_from_callable(self._fn) + suffix
 
 
 def ptransform_fn(fn):
@@ -1135,6 +1164,10 @@ class _NamedPTransform(PTransform):
   def __rrshift__(self, label):
     return _NamedPTransform(self.transform, label)
 
+  def with_resource_hints(self, **kwargs):
+    self.transform.with_resource_hints(**kwargs)
+    return self
+
   def __getattr__(self, attr):
     transform_attr = getattr(self.transform, attr)
     if callable(transform_attr):
@@ -1199,8 +1232,7 @@ def annotate_yaml(constructor):
         # The outermost call is expected to be the most specific.
         'yaml_provider': 'python',
         'yaml_type': 'PyTransform',
-        'yaml_args': config,
-    }
+        'yaml_args': config, }
     return transform
 
   return wrapper

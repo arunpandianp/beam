@@ -44,9 +44,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DEVELOCITY_ACCESS_KEY: ${{ secrets.GE_ACCESS_TOKEN }}
+  DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
   GRADLE_ENTERPRISE_CACHE_USERNAME: ${{ secrets.GE_CACHE_USERNAME }}
   GRADLE_ENTERPRISE_CACHE_PASSWORD: ${{ secrets.GE_CACHE_PASSWORD }}
+  ALLOYDB_PASSWORD: ${{ secrets.ALLOYDB_PASSWORD }}
 
 jobs:
   beam_PostCommit_Python_Xlang_Gcp_Dataflow:
@@ -56,7 +57,7 @@ jobs:
       (github.event_name == 'schedule' && github.repository == 'apache/beam') ||
       github.event.comment.body == 'Run Python_Xlang_Gcp_Dataflow PostCommit'
     runs-on: [self-hosted, ubuntu-20.04, main]
-    timeout-minutes: 180
+    timeout-minutes: 240
     name: ${{ matrix.job_name }} (${{ matrix.job_phrase }})
     strategy:
       matrix:
@@ -75,7 +76,7 @@ jobs:
         with:
           python-version: |
             3.9
-            3.12
+            3.13
       - name: run PostCommit Python Xlang Gcp Dataflow script
         uses: ./.github/actions/gradle-command-self-hosted-action
         with:

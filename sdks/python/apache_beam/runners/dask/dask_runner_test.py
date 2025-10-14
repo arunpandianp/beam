@@ -66,6 +66,25 @@ class DaskOptionsTest(unittest.TestCase):
       with self.subTest(f'{opt_name} in dask.distributed.Client constructor'):
         self.assertIn(opt_name, client_args)
 
+  def test_parser_extract_bag_kwargs__deletes_dask_kwargs(self):
+    options = PipelineOptions('--dask_npartitions 8'.split())
+    dask_options = options.view_as(DaskOptions).get_all_options()
+
+    self.assertIn('npartitions', dask_options)
+    bag_kwargs = DaskOptions._extract_bag_kwargs(dask_options)
+    self.assertNotIn('npartitions', dask_options)
+    self.assertEqual(bag_kwargs, {'npartitions': 8})
+
+  def test_parser_extract_bag_kwargs__unconfigured(self):
+    options = PipelineOptions()
+    dask_options = options.view_as(DaskOptions).get_all_options()
+
+    # It's present as a default option.
+    self.assertIn('npartitions', dask_options)
+    bag_kwargs = DaskOptions._extract_bag_kwargs(dask_options)
+    self.assertNotIn('npartitions', dask_options)
+    self.assertEqual(bag_kwargs, {})
+
 
 class DaskRunnerRunPipelineTest(unittest.TestCase):
   """Test class used to introspect the dask runner via a debugger."""
@@ -291,16 +310,13 @@ class DaskRunnerRunPipelineTest(unittest.TestCase):
       assert_that(
           main
           | "first map" >> beam.Map(
-              lambda k,
-              d,
-              l: (k, sorted(d[k]), sorted([e[1] for e in l])),
+              lambda k, d, l: (k, sorted(d[k]), sorted([e[1] for e in l])),
               beam.pvalue.AsMultiMap(side),
               beam.pvalue.AsList(side),
           )
           | "second map" >> beam.Map(
-              lambda k,
-              d,
-              l: (k[0], sorted(d[k[0]]), sorted([e[1] for e in l])),
+              lambda k, d, l:
+              (k[0], sorted(d[k[0]]), sorted([e[1] for e in l])),
               beam.pvalue.AsMultiMap(side),
               beam.pvalue.AsList(side),
           ),

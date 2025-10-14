@@ -17,8 +17,6 @@
  */
 package org.apache.beam.runners.dataflow.worker.windmill.state;
 
-import static org.apache.beam.runners.dataflow.worker.windmill.state.WindmillStateUtil.encodeKey;
-
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.Collections;
@@ -36,7 +34,7 @@ import org.apache.beam.sdk.state.OrderedListState;
 import org.apache.beam.sdk.state.ReadableState;
 import org.apache.beam.sdk.util.ByteStringOutputStream;
 import org.apache.beam.sdk.values.TimestampedValue;
-import org.apache.beam.vendor.grpc.v1p60p1.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Range;
@@ -75,9 +73,10 @@ public class WindmillOrderedList<T> extends SimpleWindmillState implements Order
       StateTag<OrderedListState<T>> spec,
       String stateFamily,
       Coder<T> elemCoder,
-      boolean isNewKey) {
+      boolean isNewKey,
+      WindmillStateTagUtil windmillStateTagUtil) {
 
-    this.stateKey = encodeKey(namespace, spec);
+    this.stateKey = windmillStateTagUtil.encodeKey(namespace, spec);
     this.stateFamily = stateFamily;
     this.elemCoder = elemCoder;
     this.complete = isNewKey;

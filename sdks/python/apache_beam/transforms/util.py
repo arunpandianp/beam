@@ -22,26 +22,32 @@
 
 import collections
 import contextlib
+import hashlib
+import hmac
 import logging
 import random
 import re
 import threading
 import time
 import uuid
+from collections.abc import Callable
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 from typing import Any
-from typing import Callable
-from typing import Iterable
 from typing import List
+from typing import Optional
 from typing import Tuple
 from typing import TypeVar
 from typing import Union
+
+from cryptography.fernet import Fernet
 
 import apache_beam as beam
 from apache_beam import coders
 from apache_beam import pvalue
 from apache_beam import typehints
 from apache_beam.metrics import Metrics
+from apache_beam.options import pipeline_options
 from apache_beam.portability import common_urns
 from apache_beam.portability.api import beam_runner_api_pb2
 from apache_beam.pvalue import AsSideInput
@@ -73,11 +79,13 @@ from apache_beam.transforms.window import TimestampCombiner
 from apache_beam.transforms.window import TimestampedValue
 from apache_beam.typehints import trivial_inference
 from apache_beam.typehints.decorators import get_signature
+from apache_beam.typehints.native_type_compatibility import TypedWindowedValue
 from apache_beam.typehints.sharded_key_type import ShardedKeyType
 from apache_beam.utils import shared
 from apache_beam.utils import windowed_value
 from apache_beam.utils.annotations import deprecated
 from apache_beam.utils.sharded_key import ShardedKey
+from apache_beam.utils.timestamp import Timestamp
 
 if TYPE_CHECKING:
   from apache_beam.runners.pipeline_context import PipelineContext
@@ -86,6 +94,8 @@ __all__ = [
     'BatchElements',
     'CoGroupByKey',
     'Distinct',
+    'GcpSecret',
+    'GroupByEncryptedKey',
     'Keys',
     'KvSwap',
     'LogElements',
@@ -93,16 +103,21 @@ __all__ = [
     'Reify',
     'RemoveDuplicates',
     'Reshuffle',
+    'Secret',
     'ToString',
     'Tee',
     'Values',
     'WithKeys',
-    'GroupIntoBatches'
+    'GroupIntoBatches',
+    'WaitOn'
 ]
 
 K = TypeVar('K')
 V = TypeVar('V')
 T = TypeVar('T')
+U = TypeVar('U')
+
+RESHUFFLE_TYPEHINT_BREAKING_CHANGE_VERSION = "2.64.0"
 
 
 class CoGroupByKey(PTransform):
@@ -261,11 +276,13 @@ class _CoGBKImpl(PTransform):
     ]
             | Flatten(pipeline=self.pipeline)
             | GroupByKey()
-            | MapTuple(collect_values))
+            | MapTuple(collect_values).with_input_types(
+                tuple[K, Iterable[tuple[U, V]]]).with_output_types(
+                    tuple[K, dict[U, list[V]]]))
 
 
 @ptransform_fn
-@typehints.with_input_types(Tuple[K, V])
+@typehints.with_input_types(tuple[K, V])
 @typehints.with_output_types(K)
 def Keys(pcoll, label='Keys'):  # pylint: disable=invalid-name
   """Produces a PCollection of first elements of 2-tuples in a PCollection."""
@@ -273,7 +290,7 @@ def Keys(pcoll, label='Keys'):  # pylint: disable=invalid-name
 
 
 @ptransform_fn
-@typehints.with_input_types(Tuple[K, V])
+@typehints.with_input_types(tuple[K, V])
 @typehints.with_output_types(V)
 def Values(pcoll, label='Values'):  # pylint: disable=invalid-name
   """Produces a PCollection of second elements of 2-tuples in a PCollection."""
@@ -281,8 +298,8 @@ def Values(pcoll, label='Values'):  # pylint: disable=invalid-name
 
 
 @ptransform_fn
-@typehints.with_input_types(Tuple[K, V])
-@typehints.with_output_types(Tuple[V, K])
+@typehints.with_input_types(tuple[K, V])
+@typehints.with_output_types(tuple[V, K])
 def KvSwap(pcoll, label='KvSwap'):  # pylint: disable=invalid-name
   """Produces a PCollection reversing 2-tuples in a PCollection."""
   return pcoll | label >> MapTuple(lambda k, v: (v, k))
@@ -307,6 +324,253 @@ def Distinct(pcoll):  # pylint: disable=invalid-name
 def RemoveDuplicates(pcoll):
   """Produces a PCollection containing distinct elements of a PCollection."""
   return pcoll | 'RemoveDuplicates' >> Distinct()
+
+
+class Secret():
+  """A secret management class used for handling sensitive data.
+
+  This class provides a generic interface for secret management. Implementations
+  of this class should handle fetching secrets from a secret management system.
+  """
+  def get_secret_bytes(self) -> bytes:
+    """Returns the secret as a byte string."""
+    raise NotImplementedError()
+
+  @staticmethod
+  def generate_secret_bytes() -> bytes:
+    """Generates a new secret key."""
+    return Fernet.generate_key()
+
+  @staticmethod
+  def parse_secret_option(secret) -> 'Secret':
+    """Parses a secret string and returns the appropriate secret type.
+
+    The secret string should be formatted like:
+    'type:<secret_type>;<secret_param>:<value>'
+
+    For example, 'type:GcpSecret;version_name:my_secret/versions/latest'
+    would return a GcpSecret initialized with 'my_secret/versions/latest'.
+    """
+    param_map = {}
+    for param in secret.split(';'):
+      parts = param.split(':')
+      param_map[parts[0]] = parts[1]
+
+    if 'type' not in param_map:
+      raise ValueError('Secret string must contain a valid type parameter')
+
+    secret_type = param_map['type'].lower()
+    del param_map['type']
+    secret_class = None
+    secret_params = None
+    if secret_type == 'gcpsecret':
+      secret_class = GcpSecret
+      secret_params = ['version_name']
+    else:
+      raise ValueError(
+          f'Invalid secret type {secret_type}, currently only '
+          'GcpSecret is supported')
+
+    for param_name in param_map.keys():
+      if param_name not in secret_params:
+        raise ValueError(
+            f'Invalid secret parameter {param_name}, '
+            f'{secret_type} only supports the following '
+            f'parameters: {secret_params}')
+    return secret_class(**param_map)
+
+
+class GcpSecret(Secret):
+  """A secret manager implementation that retrieves secrets from Google Cloud
+  Secret Manager.
+  """
+  def __init__(self, version_name: str):
+    """Initializes a GcpSecret object.
+
+    Args:
+      version_name: The full version name of the secret in Google Cloud Secret
+        Manager. For example:
+        projects/<id>/secrets/<secret_name>/versions/1.
+        For more info, see
+        https://cloud.google.com/python/docs/reference/secretmanager/latest/google.cloud.secretmanager_v1beta1.services.secret_manager_service.SecretManagerServiceClient#google_cloud_secretmanager_v1beta1_services_secret_manager_service_SecretManagerServiceClient_access_secret_version
+    """
+    self._version_name = version_name
+
+  def get_secret_bytes(self) -> bytes:
+    try:
+      from google.cloud import secretmanager
+      client = secretmanager.SecretManagerServiceClient()
+      response = client.access_secret_version(
+          request={"name": self._version_name})
+      secret = response.payload.data
+      return secret
+    except Exception as e:
+      raise RuntimeError(
+          'Failed to retrieve secret bytes for secret '
+          f'{self._version_name} with exception {e}')
+
+  def __eq__(self, secret):
+    return self._version_name == getattr(secret, '_version_name', None)
+
+
+class _EncryptMessage(DoFn):
+  """A DoFn that encrypts the key and value of each element."""
+  def __init__(
+      self,
+      hmac_key_secret: Secret,
+      key_coder: coders.Coder,
+      value_coder: coders.Coder):
+    self.hmac_key_secret = hmac_key_secret
+    self.key_coder = key_coder
+    self.value_coder = value_coder
+
+  def setup(self):
+    self._hmac_key = self.hmac_key_secret.get_secret_bytes()
+    self.fernet = Fernet(self._hmac_key)
+
+  def process(self,
+              element: Any) -> Iterable[Tuple[bytes, Tuple[bytes, bytes]]]:
+    """Encrypts the key and value of an element.
+
+    Args:
+      element: A tuple containing the key and value to be encrypted.
+
+    Yields:
+      A tuple containing the HMAC of the encoded key, and a tuple of the
+      encrypted key and value.
+    """
+    k, v = element
+    encoded_key = self.key_coder.encode(k)
+    encoded_value = self.value_coder.encode(v)
+    hmac_encoded_key = hmac.new(self._hmac_key, encoded_key,
+                                hashlib.sha256).digest()
+    out_element = (
+        hmac_encoded_key,
+        (self.fernet.encrypt(encoded_key), self.fernet.encrypt(encoded_value)))
+    yield out_element
+
+
+class _DecryptMessage(DoFn):
+  """A DoFn that decrypts the key and value of each element."""
+  def __init__(
+      self,
+      hmac_key_secret: Secret,
+      key_coder: coders.Coder,
+      value_coder: coders.Coder):
+    self.hmac_key_secret = hmac_key_secret
+    self.key_coder = key_coder
+    self.value_coder = value_coder
+
+  def setup(self):
+    hmac_key = self.hmac_key_secret.get_secret_bytes()
+    self.fernet = Fernet(hmac_key)
+
+  def decode_value(self, encoded_element: Tuple[bytes, bytes]) -> Any:
+    encrypted_value = encoded_element[1]
+    encoded_value = self.fernet.decrypt(encrypted_value)
+    real_val = self.value_coder.decode(encoded_value)
+    return real_val
+
+  def filter_elements_by_key(
+      self,
+      encrypted_key: bytes,
+      encoded_elements: Iterable[Tuple[bytes, bytes]]) -> Iterable[Any]:
+    for e in encoded_elements:
+      if encrypted_key == self.fernet.decrypt(e[0]):
+        yield self.decode_value(e)
+
+  # Right now, GBK always returns a list of elements, so we match this behavior
+  # here. This does mean that the whole list will be materialized every time,
+  # but passing an Iterable containing an Iterable breaks when pickling happens
+  def process(
+      self, element: Tuple[bytes, Iterable[Tuple[bytes, bytes]]]
+  ) -> Iterable[Tuple[Any, List[Any]]]:
+    """Decrypts the key and values of an element.
+
+    Args:
+      element: A tuple containing the HMAC of the encoded key and an iterable
+        of tuples of encrypted keys and values.
+
+    Yields:
+      A tuple containing the decrypted key and a list of decrypted values.
+    """
+    unused_hmac_encoded_key, encoded_elements = element
+    seen_keys = set()
+
+    # Since there could be hmac collisions, we will use the fernet encrypted
+    # key to confirm that the mapping is actually correct.
+    for e in encoded_elements:
+      encrypted_key, unused_encrypted_value = e
+      encoded_key = self.fernet.decrypt(encrypted_key)
+      if encoded_key in seen_keys:
+        continue
+      seen_keys.add(encoded_key)
+      real_key = self.key_coder.decode(encoded_key)
+
+      yield (
+          real_key,
+          list(self.filter_elements_by_key(encoded_key, encoded_elements)))
+
+
+@typehints.with_input_types(Tuple[K, V])
+@typehints.with_output_types(Tuple[K, Iterable[V]])
+class GroupByEncryptedKey(PTransform):
+  """A PTransform that provides a secure alternative to GroupByKey.
+
+  This transform encrypts the keys of the input PCollection, performs a
+  GroupByKey on the encrypted keys, and then decrypts the keys in the output.
+  This is useful when the keys contain sensitive data that should not be
+  stored at rest by the runner. Note the following caveats:
+  
+  1) Runners can implement arbitrary materialization steps, so this does not
+  guarantee that the whole pipeline will not have unencrypted data at rest by
+  itself.
+  2) If using this transform in streaming mode, this transform may not properly
+  handle update compatibility checks around coders. This means that an improper
+  update could lead to invalid coders, causing pipeline failure or data
+  corruption. If you need to update, make sure that the input type passed into
+  this transform does not change.
+  """
+  def __init__(self, hmac_key: Secret):
+    """Initializes a GroupByEncryptedKey transform.
+
+    Args:
+      hmac_key: A Secret object that provides the secret key for HMAC and
+        encryption. For example, a GcpSecret can be used to access a secret
+        stored in GCP Secret Manager
+    """
+    self._hmac_key = hmac_key
+
+  def expand(self, pcoll):
+    key_type, value_type = (typehints.typehints.coerce_to_kv_type(
+        pcoll.element_type).tuple_types)
+    kv_type_hint = typehints.KV[key_type, value_type]
+    if kv_type_hint and kv_type_hint != typehints.Any:
+      coder = coders.registry.get_coder(kv_type_hint).as_deterministic_coder(
+          f'GroupByEncryptedKey {self.label}'
+          'The key coder is not deterministic. This may result in incorrect '
+          'pipeline output. This can be fixed by adding a type hint to the '
+          'operation preceding the GroupByKey step, and for custom key '
+          'classes, by writing a deterministic custom Coder. Please see the '
+          'documentation for more details.')
+      if not coder.is_kv_coder():
+        raise ValueError(
+            'Input elements to the transform %s with stateful DoFn must be '
+            'key-value pairs.' % self)
+      key_coder = coder.key_coder()
+      value_coder = coder.value_coder()
+    else:
+      key_coder = coders.registry.get_coder(typehints.Any)
+      value_coder = key_coder
+
+    gbk = beam.GroupByKey()
+    gbk._inside_gbek = True
+
+    return (
+        pcoll
+        | beam.ParDo(_EncryptMessage(self._hmac_key, key_coder, value_coder))
+        | gbk
+        | beam.ParDo(_DecryptMessage(self._hmac_key, key_coder, value_coder)))
 
 
 class _BatchSizeEstimator(object):
@@ -784,7 +1048,7 @@ class WithSharedKey(DoFn):
 
 
 @typehints.with_input_types(T)
-@typehints.with_output_types(List[T])
+@typehints.with_output_types(list[T])
 class BatchElements(PTransform):
   """A Transform that batches elements for amortized processing.
 
@@ -795,7 +1059,7 @@ class BatchElements(PTransform):
 
   where the per element cost is (often significantly) smaller than the fixed
   cost and could be amortized over multiple elements.  It consumes a PCollection
-  of element type T and produces a PCollection of element type List[T].
+  of element type T and produces a PCollection of element type list[T].
 
   This transform attempts to find the best batch size between the minimim
   and maximum parameters by profiling the time taken by (fused) downstream
@@ -924,15 +1188,83 @@ class _IdentityWindowFn(NonMergingWindowFn):
     return self._window_coder
 
 
-@typehints.with_input_types(Tuple[K, V])
-@typehints.with_output_types(Tuple[K, V])
+def is_v1_prior_to_v2(*, v1, v2):
+  if v1 is None:
+    return False
+
+  v1_parts = (v1.split('.') + ['0', '0', '0'])[:3]
+  v2_parts = (v2.split('.') + ['0', '0', '0'])[:3]
+  return tuple(map(int, v1_parts)) < tuple(map(int, v2_parts))
+
+
+def is_compat_version_prior_to(options, breaking_change_version):
+  # This function is used in a branch statement to determine whether we should
+  # keep the old behavior prior to a breaking change or use the new behavior.
+  # - If update_compatibility_version < breaking_change_version, we will return
+  #   True and keep the old behavior.
+  update_compatibility_version = options.view_as(
+      pipeline_options.StreamingOptions).update_compatibility_version
+
+  return is_v1_prior_to_v2(
+      v1=update_compatibility_version, v2=breaking_change_version)
+
+
+def reify_metadata_default_window(
+    element, timestamp=DoFn.TimestampParam, pane_info=DoFn.PaneInfoParam):
+  key, value = element
+  if timestamp == window.MIN_TIMESTAMP:
+    timestamp = None
+  return key, (value, timestamp, pane_info)
+
+
+def restore_metadata_default_window(element):
+  key, values = element
+  return [
+      window.GlobalWindows.windowed_value(None).with_value((key, value))
+      if timestamp is None else window.GlobalWindows.windowed_value(
+          value=(key, value), timestamp=timestamp, pane_info=pane_info)
+      for (value, timestamp, pane_info) in values
+  ]
+
+
+def reify_metadata_custom_window(
+    element,
+    timestamp=DoFn.TimestampParam,
+    window=DoFn.WindowParam,
+    pane_info=DoFn.PaneInfoParam):
+  key, value = element
+  return key, windowed_value.WindowedValue(
+    value, timestamp, [window], pane_info)
+
+
+def restore_metadata_custom_window(element):
+  key, windowed_values = element
+  return [wv.with_value((key, wv.value)) for wv in windowed_values]
+
+
+def _reify_restore_metadata(is_default_windowing):
+  if is_default_windowing:
+    return reify_metadata_default_window, restore_metadata_default_window
+  return reify_metadata_custom_window, restore_metadata_custom_window
+
+
+def _add_pre_map_gkb_types(pre_gbk_map, is_default_windowing):
+  if is_default_windowing:
+    return pre_gbk_map.with_input_types(tuple[K, V]).with_output_types(
+        tuple[K, tuple[V, Optional[Timestamp], windowed_value.PaneInfo]])
+  return pre_gbk_map.with_input_types(tuple[K, V]).with_output_types(
+      tuple[K, TypedWindowedValue[V]])
+
+
+@typehints.with_input_types(tuple[K, V])
+@typehints.with_output_types(tuple[K, V])
 class ReshufflePerKey(PTransform):
   """PTransform that returns a PCollection equivalent to its input,
   but operationally provides some of the side effects of a GroupByKey,
   in particular checkpointing, and preventing fusion of the surrounding
   transforms.
   """
-  def expand(self, pcoll):
+  def expand_2_64_0(self, pcoll):
     windowing_saved = pcoll.windowing
     if windowing_saved.is_default():
       # In this (common) case we can use a trivial trigger driver
@@ -953,6 +1285,14 @@ class ReshufflePerKey(PTransform):
             window.GlobalWindows.windowed_value((key, value), timestamp)
             for (value, timestamp) in values
         ]
+
+      if is_compat_version_prior_to(pcoll.pipeline.options,
+                                    RESHUFFLE_TYPEHINT_BREAKING_CHANGE_VERSION):
+        pre_gbk_map = Map(reify_timestamps).with_output_types(Any)
+      else:
+        pre_gbk_map = Map(reify_timestamps).with_input_types(
+            tuple[K, V]).with_output_types(
+                tuple[K, tuple[V, Optional[Timestamp]]])
     else:
 
       # typing: All conditional function variants must have identical signatures
@@ -966,7 +1306,14 @@ class ReshufflePerKey(PTransform):
         key, windowed_values = element
         return [wv.with_value((key, wv.value)) for wv in windowed_values]
 
-    ungrouped = pcoll | Map(reify_timestamps).with_output_types(Any)
+      if is_compat_version_prior_to(pcoll.pipeline.options,
+                                    RESHUFFLE_TYPEHINT_BREAKING_CHANGE_VERSION):
+        pre_gbk_map = Map(reify_timestamps).with_output_types(Any)
+      else:
+        pre_gbk_map = Map(reify_timestamps).with_input_types(
+            tuple[K, V]).with_output_types(tuple[K, TypedWindowedValue[V]])
+
+    ungrouped = pcoll | pre_gbk_map
 
     # TODO(https://github.com/apache/beam/issues/19785) Using global window as
     # one of the standard window. This is to mitigate the Dataflow Java Runner
@@ -980,6 +1327,33 @@ class ReshufflePerKey(PTransform):
         ungrouped
         | GroupByKey()
         | FlatMap(restore_timestamps).with_output_types(Any))
+    result._windowing = windowing_saved
+    return result
+
+  def expand(self, pcoll):
+    if is_compat_version_prior_to(pcoll.pipeline.options, "2.65.0"):
+      return self.expand_2_64_0(pcoll)
+
+    windowing_saved = pcoll.windowing
+    is_default_windowing = windowing_saved.is_default()
+    reify_fn, restore_fn = _reify_restore_metadata(is_default_windowing)
+
+    pre_gbk_map = _add_pre_map_gkb_types(Map(reify_fn), is_default_windowing)
+
+    ungrouped = pcoll | pre_gbk_map
+
+    # TODO(https://github.com/apache/beam/issues/19785) Using global window as
+    # one of the standard window. This is to mitigate the Dataflow Java Runner
+    # Harness limitation to accept only standard coders.
+    ungrouped._windowing = Windowing(
+        window.GlobalWindows(),
+        triggerfn=Always(),
+        accumulation_mode=AccumulationMode.DISCARDING,
+        timestamp_combiner=TimestampCombiner.OUTPUT_AT_EARLIEST)
+    result = (
+        ungrouped
+        | GroupByKey()
+        | FlatMap(restore_fn).with_output_types(Any))
     result._windowing = windowing_saved
     return result
 
@@ -1014,16 +1388,22 @@ class Reshuffle(PTransform):
 
   def expand(self, pcoll):
     # type: (pvalue.PValue) -> pvalue.PCollection
+    if is_compat_version_prior_to(pcoll.pipeline.options,
+                                  RESHUFFLE_TYPEHINT_BREAKING_CHANGE_VERSION):
+      reshuffle_step = ReshufflePerKey()
+    else:
+      reshuffle_step = ReshufflePerKey().with_input_types(
+          tuple[int, T]).with_output_types(tuple[int, T])
     return (
         pcoll | 'AddRandomKeys' >>
         Map(lambda t: (random.randrange(0, self.num_buckets), t)
-            ).with_input_types(T).with_output_types(Tuple[int, T])
-        | ReshufflePerKey()
+            ).with_input_types(T).with_output_types(tuple[int, T])
+        | reshuffle_step
         | 'RemoveRandomKeys' >> Map(lambda t: t[1]).with_input_types(
-            Tuple[int, T]).with_output_types(T))
+            tuple[int, T]).with_output_types(T))
 
   def to_runner_api_parameter(self, unused_context):
-    # type: (PipelineContext) -> Tuple[str, None]
+    # type: (PipelineContext) -> tuple[str, None]
     return common_urns.composites.RESHUFFLE.urn, None
 
   @staticmethod
@@ -1061,19 +1441,22 @@ def WithKeys(pcoll, k, *args, **kwargs):
       if all(isinstance(arg, AsSideInput)
              for arg in args) and all(isinstance(kwarg, AsSideInput)
                                       for kwarg in kwargs.values()):
-        return pcoll | Map(
-            lambda v,
-            *args,
-            **kwargs: (k(v, *args, **kwargs), v),
+        # Map(lambda) produces a label formatted like this, but it cannot be
+        # changed without breaking update compat. Here, we pin to the transform
+        # name used in the 2.68 release to avoid breaking changes when the line
+        # number changes. Context: https://github.com/apache/beam/pull/36381
+        return pcoll | "Map(<lambda at util.py:1189>)" >> Map(
+            lambda v, *args, **kwargs: (k(v, *args, **kwargs), v),
             *args,
             **kwargs)
-      return pcoll | Map(lambda v: (k(v, *args, **kwargs), v))
-    return pcoll | Map(lambda v: (k(v), v))
-  return pcoll | Map(lambda v: (k, v))
+      return pcoll | "Map(<lambda at util.py:1192>)" >> Map(
+          lambda v: (k(v, *args, **kwargs), v))
+    return pcoll | "Map(<lambda at util.py:1193>)" >> Map(lambda v: (k(v), v))
+  return pcoll | "Map(<lambda at util.py:1194>)" >> Map(lambda v: (k, v))
 
 
-@typehints.with_input_types(Tuple[K, V])
-@typehints.with_output_types(Tuple[K, Iterable[V]])
+@typehints.with_input_types(tuple[K, V])
+@typehints.with_output_types(tuple[K, Iterable[V]])
 class GroupIntoBatches(PTransform):
   """PTransform that batches the input into desired batch size. Elements are
   buffered until they are equal to batch size provided in the argument at which
@@ -1110,7 +1493,7 @@ class GroupIntoBatches(PTransform):
   def to_runner_api_parameter(
       self,
       unused_context  # type: PipelineContext
-  ):  # type: (...) -> Tuple[str, beam_runner_api_pb2.GroupIntoBatchesPayload]
+  ):  # type: (...) -> tuple[str, beam_runner_api_pb2.GroupIntoBatchesPayload]
     return (
         common_urns.group_into_batches_components.GROUP_INTO_BATCHES.urn,
         self.params.get_payload())
@@ -1122,7 +1505,7 @@ class GroupIntoBatches(PTransform):
   def from_runner_api_parameter(unused_ptransform, proto, unused_context):
     return GroupIntoBatches(*_GroupIntoBatchesParams.parse_payload(proto))
 
-  @typehints.with_input_types(Tuple[K, V])
+  @typehints.with_input_types(tuple[K, V])
   @typehints.with_output_types(
       typehints.Tuple[
           ShardedKeyType[typehints.TypeVariable(K)],  # type: ignore[misc]
@@ -1149,7 +1532,11 @@ class GroupIntoBatches(PTransform):
 
     def expand(self, pcoll):
       key_type, value_type = pcoll.element_type.tuple_types
-      sharded_pcoll = pcoll | Map(
+      # Map(lambda) produces a label formatted like this, but it cannot be
+      # changed without breaking update compat. Here, we pin to the transform
+      # name used in the 2.68 release to avoid breaking changes when the line
+      # number changes. Context: https://github.com/apache/beam/pull/36381
+      sharded_pcoll = pcoll | "Map(<lambda at util.py:1275>)" >> Map(
           lambda key_value: (
               ShardedKey(
                   key_value[0],
@@ -1170,7 +1557,7 @@ class GroupIntoBatches(PTransform):
     def to_runner_api_parameter(
         self,
         unused_context  # type: PipelineContext
-    ):  # type: (...) -> Tuple[str, beam_runner_api_pb2.GroupIntoBatchesPayload]
+    ):  # type: (...) -> tuple[str, beam_runner_api_pb2.GroupIntoBatchesPayload]
       return (
           common_urns.composites.GROUP_INTO_BATCHES_WITH_SHARDED_KEY.urn,
           self.params.get_payload())
@@ -1208,8 +1595,8 @@ class _GroupIntoBatchesParams:
         'batch_size must be a positive value')
     assert (
         self.max_buffering_duration_secs is not None and
-        self.max_buffering_duration_secs >= 0), (
-            'max_buffering_duration must be a non-negative value')
+        self.max_buffering_duration_secs
+        >= 0), ('max_buffering_duration must be a non-negative value')
 
   def get_payload(self):
     return beam_runner_api_pb2.GroupIntoBatchesPayload(
@@ -1329,30 +1716,49 @@ class LogElements(PTransform):
     level: (optional) The logging level for the output (e.g. `logging.DEBUG`,
         `logging.INFO`, `logging.WARNING`, `logging.ERROR`). If not specified,
         the log is printed to stdout.
+    with_pane_info (bool): (optional) Whether to include element's pane info.
+    use_epoch_time (bool): (optional) Whether to display epoch timestamps.
   """
   class _LoggingFn(DoFn):
     def __init__(
-        self, prefix='', with_timestamp=False, with_window=False, level=None):
+        self,
+        prefix='',
+        with_timestamp=False,
+        with_window=False,
+        level=None,
+        with_pane_info=False,
+        use_epoch_time=False):
       super().__init__()
       self.prefix = prefix
       self.with_timestamp = with_timestamp
       self.with_window = with_window
       self.level = level
+      self.with_pane_info = with_pane_info
+      self.use_epoch_time = use_epoch_time
+
+    def format_timestamp(self, timestamp):
+      if self.use_epoch_time:
+        return timestamp.seconds()
+      return timestamp.to_rfc3339()
 
     def process(
         self,
         element,
         timestamp=DoFn.TimestampParam,
         window=DoFn.WindowParam,
+        pane_info=DoFn.PaneInfoParam,
         **kwargs):
       log_line = self.prefix + str(element)
 
       if self.with_timestamp:
-        log_line += ', timestamp=' + repr(timestamp.to_rfc3339())
+        log_line += ', timestamp=' + repr(self.format_timestamp(timestamp))
 
       if self.with_window:
-        log_line += ', window(start=' + window.start.to_rfc3339()
-        log_line += ', end=' + window.end.to_rfc3339() + ')'
+        log_line += ', window(start=' + str(self.format_timestamp(window.start))
+        log_line += ', end=' + str(self.format_timestamp(window.end)) + ')'
+
+      if self.with_pane_info:
+        log_line += ', pane_info=' + repr(pane_info)
 
       if self.level == logging.DEBUG:
         logging.debug(log_line)
@@ -1375,17 +1781,28 @@ class LogElements(PTransform):
       prefix='',
       with_timestamp=False,
       with_window=False,
-      level=None):
+      level=None,
+      with_pane_info=False,
+      use_epoch_time=False,
+  ):
     super().__init__(label)
     self.prefix = prefix
     self.with_timestamp = with_timestamp
     self.with_window = with_window
+    self.with_pane_info = with_pane_info
+    self.use_epoch_time = use_epoch_time
     self.level = level
 
   def expand(self, input):
     return input | ParDo(
         self._LoggingFn(
-            self.prefix, self.with_timestamp, self.with_window, self.level))
+            self.prefix,
+            self.with_timestamp,
+            self.with_window,
+            self.level,
+            self.with_pane_info,
+            self.use_epoch_time,
+        ))
 
 
 class Reify(object):
@@ -1417,8 +1834,8 @@ class Reify(object):
     def expand(self, pcoll):
       return pcoll | ParDo(self.add_window_info)
 
-  @typehints.with_input_types(Tuple[K, V])
-  @typehints.with_output_types(Tuple[K, V])
+  @typehints.with_input_types(tuple[K, V])
+  @typehints.with_output_types(tuple[K, V])
   class TimestampInValue(PTransform):
     """PTransform to wrap the Value in a KV pair in a TimestampedValue with
     the element's associated timestamp."""
@@ -1430,8 +1847,8 @@ class Reify(object):
     def expand(self, pcoll):
       return pcoll | ParDo(self.add_timestamp_info)
 
-  @typehints.with_input_types(Tuple[K, V])
-  @typehints.with_output_types(Tuple[K, V])
+  @typehints.with_input_types(tuple[K, V])
+  @typehints.with_output_types(tuple[K, V])
   class WindowInValue(PTransform):
     """PTransform to convert the Value in a KV pair into a tuple of
     (value, timestamp, window), with the whole element being wrapped inside a
@@ -1490,7 +1907,7 @@ class Regex(object):
 
   @staticmethod
   @typehints.with_input_types(str)
-  @typehints.with_output_types(List[str])
+  @typehints.with_output_types(list[str])
   @ptransform_fn
   def all_matches(pcoll, regex):
     """
@@ -1511,7 +1928,7 @@ class Regex(object):
 
   @staticmethod
   @typehints.with_input_types(str)
-  @typehints.with_output_types(Tuple[str, str])
+  @typehints.with_output_types(tuple[str, str])
   @ptransform_fn
   def matches_kv(pcoll, regex, keyGroup, valueGroup=0):
     """
@@ -1558,7 +1975,7 @@ class Regex(object):
 
   @staticmethod
   @typehints.with_input_types(str)
-  @typehints.with_output_types(Union[List[str], List[Tuple[str, str]]])
+  @typehints.with_output_types(Union[list[str], list[tuple[str, str]]])
   @ptransform_fn
   def find_all(pcoll, regex, group=0, outputEmpty=True):
     """
@@ -1587,7 +2004,7 @@ class Regex(object):
 
   @staticmethod
   @typehints.with_input_types(str)
-  @typehints.with_output_types(Tuple[str, str])
+  @typehints.with_output_types(tuple[str, str])
   @ptransform_fn
   def find_kv(pcoll, regex, keyGroup, valueGroup=0):
     """
@@ -1624,7 +2041,12 @@ class Regex(object):
       replacement: the string to be substituted for each match.
     """
     regex = Regex._regex_compile(regex)
-    return pcoll | Map(lambda elem: regex.sub(replacement, elem))
+    # Map(lambda) produces a label formatted like this, but it cannot be
+    # changed without breaking update compat. Here, we pin to the transform
+    # name used in the 2.68 release to avoid breaking changes when the line
+    # number changes. Context: https://github.com/apache/beam/pull/36381
+    return pcoll | "Map(<lambda at util.py:1779>)" >> Map(
+        lambda elem: regex.sub(replacement, elem))
 
   @staticmethod
   @typehints.with_input_types(str)
@@ -1640,11 +2062,16 @@ class Regex(object):
       replacement: the string to be substituted for each match.
     """
     regex = Regex._regex_compile(regex)
-    return pcoll | Map(lambda elem: regex.sub(replacement, elem, 1))
+    # Map(lambda) produces a label formatted like this, but it cannot be
+    # changed without breaking update compat. Here, we pin to the transform
+    # name used in the 2.68 release to avoid breaking changes when the line
+    # number changes. Context: https://github.com/apache/beam/pull/36381
+    return pcoll | "Map(<lambda at util.py:1795>)" >> Map(
+        lambda elem: regex.sub(replacement, elem, 1))
 
   @staticmethod
   @typehints.with_input_types(str)
-  @typehints.with_output_types(List[str])
+  @typehints.with_output_types(list[str])
   @ptransform_fn
   def split(pcoll, regex, outputEmpty=False):
     """
@@ -1691,7 +2118,6 @@ class Tee(PTransform):
 
   def expand(self, input):
     for consumer in self._consumers:
-      print("apply", consumer)
       if callable(consumer):
         _ = input | ptransform_fn(consumer)()
       else:
@@ -1732,4 +2158,9 @@ class WaitOn(PTransform):
             | f"WaitOn{ix}" >> (beam.FlatMap(lambda x: ()) | GroupByKey()))
         for (ix, side) in enumerate(self._to_be_waited_on)
     ]
-    return pcoll | beam.Map(lambda x, *unused_sides: x, *sides)
+    # Map(lambda) produces a label formatted like this, but it cannot be
+    # changed without breaking update compat. Here, we pin to the transform
+    # name used in the 2.68 release to avoid breaking changes when the line
+    # number changes. Context: https://github.com/apache/beam/pull/36381
+    return pcoll | "Map(<lambda at util.py:1886>)" >> beam.Map(
+        lambda x, *unused_sides: x, *sides)

@@ -301,6 +301,34 @@ class TestBigQueryWrapper(unittest.TestCase):
     new_dataset = wrapper.get_or_create_dataset('project-id', 'dataset_id')
     self.assertEqual(new_dataset.datasetReference.datasetId, 'dataset_id')
 
+  def test_create_temporary_dataset_with_kms_key(self):
+    kms_key = (
+        'projects/my-project/locations/global/keyRings/my-kr/'
+        'cryptoKeys/my-key')
+    client = mock.Mock()
+    client.datasets.Get.side_effect = HttpError(
+        response={'status': '404'}, url='', content='')
+
+    client.datasets.Insert.return_value = bigquery.Dataset(
+        datasetReference=bigquery.DatasetReference(
+            projectId='project-id', datasetId='temp_dataset'))
+    wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
+
+    try:
+      wrapper.create_temporary_dataset(
+          'project-id', 'location', kms_key=kms_key)
+    except Exception:
+      pass
+
+    args, _ = client.datasets.Insert.call_args
+    insert_request = args[0]  # BigqueryDatasetsInsertRequest
+    inserted_dataset = insert_request.dataset  # Actual Dataset object
+
+    # Assertions
+    self.assertIsNotNone(inserted_dataset.defaultEncryptionConfiguration)
+    self.assertEqual(
+        inserted_dataset.defaultEncryptionConfiguration.kmsKeyName, kms_key)
+
   def test_get_or_create_dataset_fetched(self):
     client = mock.Mock()
     client.datasets.Get.return_value = bigquery.Dataset(
@@ -577,6 +605,27 @@ class TestBigQueryWrapper(unittest.TestCase):
     self.assertEqual(
         client.jobs.Insert.call_args[0][0].job.configuration.query.priority,
         'INTERACTIVE')
+
+  def test_get_temp_table_project_with_temp_table_ref(self):
+    """Test _get_temp_table_project returns project from temp_table_ref."""
+    client = mock.Mock()
+    temp_table_ref = bigquery.TableReference(
+        projectId='temp-project',
+        datasetId='temp_dataset',
+        tableId='temp_table')
+    wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(
+        client, temp_table_ref=temp_table_ref)
+
+    result = wrapper._get_temp_table_project('fallback-project')
+    self.assertEqual(result, 'temp-project')
+
+  def test_get_temp_table_project_without_temp_table_ref(self):
+    """Test _get_temp_table_project returns fallback when no temp_table_ref."""
+    client = mock.Mock()
+    wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
+
+    result = wrapper._get_temp_table_project('fallback-project')
+    self.assertEqual(result, 'fallback-project')
 
 
 @unittest.skipIf(HttpError is None, 'GCP dependencies are not installed')
@@ -867,7 +916,15 @@ class TestBeamRowFromDict(unittest.TestCase):
     self.assertEqual(expected_beam_row, beam_row_from_dict(dict_row, schema))
 
   def test_dict_to_beam_row_all_types_nullable(self):
-    schema = {"fields": self.get_schema_fields_with_mode("nullable")}
+    schema_fields_with_nested = [{
+        "name": "nested_record",
+        "type": "record",
+        "mode": "repeated",
+        "fields": self.get_schema_fields_with_mode("nullable")
+    }]
+    schema_fields_with_nested.extend(
+        self.get_schema_fields_with_mode("nullable"))
+    schema = {"fields": schema_fields_with_nested}
     dict_row = {k: None for k in self.DICT_ROW}
 
     # input dict row with missing nullable fields should still yield a full
@@ -876,6 +933,7 @@ class TestBeamRowFromDict(unittest.TestCase):
     del dict_row['bool']
 
     expected_beam_row = beam.Row(
+        nested_record=None,
         str=None,
         bool=None,
         bytes=None,
@@ -985,9 +1043,8 @@ class TestBeamTypehintFromSchema(unittest.TestCase):
     schema = {"fields": self.get_schema_fields_with_mode("repeated")}
     typehints = get_beam_typehints_from_tableschema(schema)
 
-    expected_repeated_typehints = [
-        (name, Sequence[type]) for name, type in self.EXPECTED_TYPEHINTS
-    ]
+    expected_repeated_typehints = [(name, Sequence[type])
+                                   for name, type in self.EXPECTED_TYPEHINTS]
 
     self.assertEqual(typehints, expected_repeated_typehints)
 
@@ -995,9 +1052,8 @@ class TestBeamTypehintFromSchema(unittest.TestCase):
     schema = {"fields": self.get_schema_fields_with_mode("nullable")}
     typehints = get_beam_typehints_from_tableschema(schema)
 
-    expected_nullable_typehints = [
-        (name, Optional[type]) for name, type in self.EXPECTED_TYPEHINTS
-    ]
+    expected_nullable_typehints = [(name, Optional[type])
+                                   for name, type in self.EXPECTED_TYPEHINTS]
 
     self.assertEqual(typehints, expected_nullable_typehints)
 

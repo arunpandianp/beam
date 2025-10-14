@@ -22,15 +22,12 @@
 
 import collections
 import types
+from collections.abc import Callable
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 from typing import Any
-from typing import Callable
-from typing import Dict
-from typing import Iterable
 from typing import NamedTuple
 from typing import Optional
-from typing import Set
-from typing import Tuple
 from typing import TypeVar
 
 from apache_beam.coders import Coder
@@ -67,7 +64,10 @@ class StateSpec(object):
 
 
 class ReadModifyWriteStateSpec(StateSpec):
-  """Specification for a user DoFn value state cell."""
+  """Specification for a user DoFn value state cell.
+     Read more about ReadModifyWriteState (ValueState) here:
+     https://beam.apache.org/documentation/programming-guide/#valuestate
+  """
   def to_runner_api(
       self, context: 'PipelineContext') -> beam_runner_api_pb2.StateSpec:
     return beam_runner_api_pb2.StateSpec(
@@ -78,7 +78,10 @@ class ReadModifyWriteStateSpec(StateSpec):
 
 
 class BagStateSpec(StateSpec):
-  """Specification for a user DoFn bag state cell."""
+  """Specification for a user DoFn bag state cell.
+  Read more about BagState here:
+  https://beam.apache.org/documentation/programming-guide/#bagstate
+  """
   def to_runner_api(
       self, context: 'PipelineContext') -> beam_runner_api_pb2.StateSpec:
     return beam_runner_api_pb2.StateSpec(
@@ -89,7 +92,10 @@ class BagStateSpec(StateSpec):
 
 
 class SetStateSpec(StateSpec):
-  """Specification for a user DoFn Set State cell"""
+  """Specification for a user DoFn Set State cell.
+  Read more about SetState here:
+  https://beam.apache.org/documentation/programming-guide/#setstate
+  """
   def to_runner_api(
       self, context: 'PipelineContext') -> beam_runner_api_pb2.StateSpec:
     return beam_runner_api_pb2.StateSpec(
@@ -100,7 +106,10 @@ class SetStateSpec(StateSpec):
 
 
 class CombiningValueStateSpec(StateSpec):
-  """Specification for a user DoFn combining value state cell."""
+  """Specification for a user DoFn combining value state cell.
+  Read more about CombiningValueState here:
+  https://beam.apache.org/documentation/programming-guide/#combiningstate
+  """
   def __init__(
       self,
       name: str,
@@ -151,7 +160,10 @@ class CombiningValueStateSpec(StateSpec):
 
 
 class OrderedListStateSpec(StateSpec):
-  """Specification for a user DoFn ordered list state cell."""
+  """Specification for a user DoFn ordered list state cell.
+     Read more about OrderedListState here:
+     https://beam.apache.org/documentation/programming-guide/#orderliststate
+  """
   def to_runner_api(
       self, context: 'PipelineContext') -> beam_runner_api_pb2.StateSpec:
     return beam_runner_api_pb2.StateSpec(
@@ -167,7 +179,7 @@ Timer = NamedTuple(
     [
         ('user_key', Any),
         ('dynamic_timer_tag', str),
-        ('windows', Tuple['windowed_value.BoundedWindow', ...]),
+        ('windows', tuple['windowed_value.BoundedWindow', ...]),
         ('clear_bit', bool),
         ('fire_timestamp', Optional['Timestamp']),
         ('hold_timestamp', Optional['Timestamp']),
@@ -177,7 +189,10 @@ Timer = NamedTuple(
 
 # TODO(BEAM-9562): Plumb through actual key_coder and window_coder.
 class TimerSpec(object):
-  """Specification for a user stateful DoFn timer."""
+  """Specification for a user stateful DoFn timer.
+     Read more about Timers here:
+     https://beam.apache.org/documentation/programming-guide/#timers
+  """
   prefix = "ts-"
 
   def __init__(self, name: str, time_domain: str) -> None:
@@ -228,7 +243,7 @@ def on_timer(timer_spec: TimerSpec) -> Callable[[CallableT], CallableT]:
   return _inner
 
 
-def get_dofn_specs(dofn: 'DoFn') -> Tuple[Set[StateSpec], Set[TimerSpec]]:
+def get_dofn_specs(dofn: 'DoFn') -> tuple[set[StateSpec], set[TimerSpec]]:
   """Gets the state and timer specs for a DoFn, if any.
 
   Args:
@@ -320,7 +335,7 @@ _TimerTuple = collections.namedtuple('timer_tuple', ('cleared', 'timestamp'))  #
 class RuntimeTimer(BaseTimer):
   """Timer interface object passed to user code."""
   def __init__(self) -> None:
-    self._timer_recordings: Dict[str, _TimerTuple] = {}
+    self._timer_recordings: dict[str, _TimerTuple] = {}
     self._cleared = False
     self._new_timestamp: Optional[Timestamp] = None
 
@@ -372,28 +387,40 @@ class AccumulatingRuntimeState(RuntimeState):
 
 
 class BagRuntimeState(AccumulatingRuntimeState):
-  """Bag state interface object passed to user code."""
+  """Bag state interface object passed to user code.
+  Read more about BagState here:
+  https://beam.apache.org/documentation/programming-guide/#bagstate
+  """
 
 
 class SetRuntimeState(AccumulatingRuntimeState):
-  """Set state interface object passed to user code."""
+  """Set state interface object passed to user code.
+  Read more about SetState here:
+  https://beam.apache.org/documentation/programming-guide/#setstate
+  """
 
 
 class CombiningValueRuntimeState(AccumulatingRuntimeState):
-  """Combining value state interface object passed to user code."""
+  """Combining value state interface object passed to user code.
+  Read more about CombiningValueState here:
+  https://beam.apache.org/documentation/programming-guide/#combiningstate
+  """
 
 
 class OrderedListRuntimeState(AccumulatingRuntimeState):
-  """Ordered list state interface object passed to user code."""
-  def read(self) -> Iterable[Tuple[Timestamp, Any]]:
+  """Ordered list state interface object passed to user code.
+  Read more about OrderedListState here:
+  https://beam.apache.org/documentation/programming-guide/#orderliststate
+  """
+  def read(self) -> Iterable[tuple[Timestamp, Any]]:
     raise NotImplementedError(type(self))
 
-  def add(self, value: Tuple[Timestamp, Any]) -> None:
+  def add(self, value: tuple[Timestamp, Any]) -> None:
     raise NotImplementedError(type(self))
 
   def read_range(
       self, min_time_stamp: Timestamp,
-      limit_time_stamp: Timestamp) -> Iterable[Tuple[Timestamp, Any]]:
+      limit_time_stamp: Timestamp) -> Iterable[tuple[Timestamp, Any]]:
     raise NotImplementedError(type(self))
 
   def clear_range(

@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.io.kafka;
 
-import static org.apache.beam.sdk.io.kafka.KafkaIOTest.mkKafkaReadTransform;
+import static org.apache.beam.sdk.io.kafka.KafkaIOTest.mkKafkaReadTransformWithOffsetDedup;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.empty;
@@ -108,13 +108,16 @@ public class KafkaIOReadImplementationCompatibilityTest {
       Function<KafkaIO.Read<Integer, Long>, KafkaIO.Read<Integer, Long>> kafkaReadDecorator) {
     p.apply(
         kafkaReadDecorator.apply(
-            mkKafkaReadTransform(
+            KafkaIOTest.mkKafkaReadTransform(
                 1000,
                 null,
                 new ValueAsTimestampFn(),
                 false, /*redistribute*/
                 false, /*allowDuplicates*/
-                0)));
+                0, /*numKeys*/
+                null, /*offsetDeduplication*/
+                null, /*topics*/
+                null /*redistributeByRecordKey*/)));
     return p.run();
   }
 
@@ -132,6 +135,17 @@ public class KafkaIOReadImplementationCompatibilityTest {
   public void testReadTransformCreationWithLegacyImplementationBoundProperty() {
     PipelineResult r =
         testReadTransformCreationWithImplementationBoundProperties(legacyDecoratorFunction());
+    String[] expect =
+        KafkaIOTest.mkKafkaTopics.stream()
+            .map(topic -> String.format("kafka:`%s`.%s", KafkaIOTest.mkKafkaServers, topic))
+            .toArray(String[]::new);
+    assertThat(Lineage.query(r.metrics(), Lineage.Type.SOURCE), containsInAnyOrder(expect));
+  }
+
+  @Test
+  public void testReadTransformCreationWithOffsetDeduplication() {
+    p.apply(mkKafkaReadTransformWithOffsetDedup(1000, new ValueAsTimestampFn()));
+    PipelineResult r = p.run();
     String[] expect =
         KafkaIOTest.mkKafkaTopics.stream()
             .map(topic -> String.format("kafka:`%s`.%s", KafkaIOTest.mkKafkaServers, topic))

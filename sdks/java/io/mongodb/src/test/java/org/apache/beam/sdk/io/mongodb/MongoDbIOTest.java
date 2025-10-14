@@ -21,7 +21,8 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.junit.Assert.assertEquals;
 
-import com.mongodb.MongoClient;
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Filters;
@@ -57,6 +58,7 @@ import org.junit.BeforeClass;
 import org.junit.ClassRule;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ExpectedException;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -83,6 +85,8 @@ public class MongoDbIOTest {
 
   @Rule public final TestPipeline pipeline = TestPipeline.create();
 
+  @Rule public transient ExpectedException thrown = ExpectedException.none();
+
   @BeforeClass
   public static void beforeClass() throws Exception {
     port = NetworkTestHelper.getAvailableLocalPort();
@@ -104,7 +108,7 @@ public class MongoDbIOTest {
             .build();
     mongodExecutable = mongodStarter.prepare(mongodConfig);
     mongodProcess = mongodExecutable.start();
-    client = new MongoClient("localhost", port);
+    client = MongoClients.create("mongodb://localhost:" + port);
     database = client.getDatabase(DATABASE_NAME);
 
     LOG.info("Insert test data");
@@ -420,6 +424,20 @@ public class MongoDbIOTest {
     Document out = database.getCollection(collectionName).find(new Document("_id", 1)).first();
     assertEquals("Updated", out.get("scientist"));
     assertEquals("India", out.get("country"));
+  }
+
+  @Test
+  public void testUnknownQueryFnClass() throws IllegalArgumentException {
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage(
+        "[org.apache.beam.sdk.io.mongodb.AutoValue_FindQueryTest]" + MongoDbIO.ERROR_MSG_QUERY_FN);
+
+    pipeline.apply(
+        MongoDbIO.read()
+            .withUri("mongodb://localhost:" + port)
+            .withDatabase(DATABASE_NAME)
+            .withCollection(COLLECTION_NAME)
+            .withQueryFn(FindQueryTest.create().withFilters(Filters.eq("scientist", "Einstein"))));
   }
 
   private static List<Document> createDocuments(final int n, boolean addId) {

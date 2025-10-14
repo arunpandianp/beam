@@ -30,6 +30,7 @@ import com.google.api.client.googleapis.services.json.AbstractGoogleJsonClientRe
 import com.google.api.client.http.HttpHeaders;
 import com.google.api.client.http.HttpRequestInitializer;
 import com.google.api.client.http.HttpStatusCodes;
+import com.google.api.client.http.HttpTransport;
 import com.google.api.client.util.BackOff;
 import com.google.api.client.util.Sleeper;
 import com.google.api.services.storage.Storage;
@@ -52,6 +53,7 @@ import com.google.cloud.hadoop.util.RetryDeterminer;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.nio.file.AccessDeniedException;
@@ -205,6 +207,19 @@ public class GcsUtil {
 
   private static final FluentBackoff BACKOFF_FACTORY =
       FluentBackoff.DEFAULT.withMaxRetries(10).withInitialBackoff(Duration.standardSeconds(1));
+  private static final RetryDeterminer<IOException> RETRY_DETERMINER =
+      new RetryDeterminer<IOException>() {
+        @Override
+        public boolean shouldRetry(IOException e) {
+          if (e instanceof GoogleJsonResponseException) {
+            int statusCode = ((GoogleJsonResponseException) e).getStatusCode();
+            return statusCode == 408 // Request Timeout
+                || statusCode == 429 // Too many requests
+                || (statusCode >= 500 && statusCode < 600); // Server errors
+          }
+          return RetryDeterminer.SOCKET_ERRORS.shouldRetry(e);
+        }
+      };
 
   /////////////////////////////////////////////////////////////////////////////
 
@@ -739,7 +754,47 @@ public class GcsUtil {
 
   GoogleCloudStorage createGoogleCloudStorage(
       GoogleCloudStorageOptions options, Storage storage, Credentials credentials) {
-    return new GoogleCloudStorageImpl(options, storage, credentials);
+    try {
+      return new GoogleCloudStorageImpl(options, storage, credentials);
+    } catch (NoSuchMethodError e) {
+      // gcs-connector 3.x drops the direct constructor and exclusively uses Builder
+      // TODO eliminate reflection once Beam drops Java 8 support and upgrades to gcsio 3.x
+      try {
+        final Method builderMethod = GoogleCloudStorageImpl.class.getMethod("builder");
+        Object builder = builderMethod.invoke(null);
+        final Class<?> builderClass =
+            Class.forName(
+                "com.google.cloud.hadoop.gcsio.AutoBuilder_GoogleCloudStorageImpl_Builder");
+
+        final Method setOptionsMethod =
+            builderClass.getMethod("setOptions", GoogleCloudStorageOptions.class);
+        setOptionsMethod.setAccessible(true);
+        builder = setOptionsMethod.invoke(builder, options);
+
+        final Method setHttpTransportMethod =
+            builderClass.getMethod("setHttpTransport", HttpTransport.class);
+        setHttpTransportMethod.setAccessible(true);
+        builder =
+            setHttpTransportMethod.invoke(builder, storage.getRequestFactory().getTransport());
+
+        final Method setCredentialsMethod =
+            builderClass.getMethod("setCredentials", Credentials.class);
+        setCredentialsMethod.setAccessible(true);
+        builder = setCredentialsMethod.invoke(builder, credentials);
+
+        final Method setHttpRequestInitializerMethod =
+            builderClass.getMethod("setHttpRequestInitializer", HttpRequestInitializer.class);
+        setHttpRequestInitializerMethod.setAccessible(true);
+        builder = setHttpRequestInitializerMethod.invoke(builder, httpRequestInitializer);
+
+        final Method buildMethod = builderClass.getMethod("build");
+        buildMethod.setAccessible(true);
+        return (GoogleCloudStorage) buildMethod.invoke(builder);
+      } catch (Exception reflectionError) {
+        throw new RuntimeException(
+            "Failed to construct GoogleCloudStorageImpl from gcsio 3.x Builder", reflectionError);
+      }
+    }
   }
 
   /**
@@ -821,7 +876,7 @@ public class GcsUtil {
               if (errorExtractor.itemNotFound(e) || errorExtractor.accessDenied(e)) {
                 return false;
               }
-              return RetryDeterminer.SOCKET_ERRORS.shouldRetry(e);
+              return RETRY_DETERMINER.shouldRetry(e);
             }
           },
           IOException.class,
@@ -860,7 +915,7 @@ public class GcsUtil {
               if (errorExtractor.itemAlreadyExists(e) || errorExtractor.accessDenied(e)) {
                 return false;
               }
-              return RetryDeterminer.SOCKET_ERRORS.shouldRetry(e);
+              return RETRY_DETERMINER.shouldRetry(e);
             }
           },
           IOException.class,
@@ -898,7 +953,7 @@ public class GcsUtil {
               if (errorExtractor.itemNotFound(e) || errorExtractor.accessDenied(e)) {
                 return false;
               }
-              return RetryDeterminer.SOCKET_ERRORS.shouldRetry(e);
+              return RETRY_DETERMINER.shouldRetry(e);
             }
           },
           IOException.class,
@@ -935,7 +990,7 @@ public class GcsUtil {
 
     try {
       try {
-        MoreFutures.get(MoreFutures.allAsList(futures));
+        MoreFutures.get(MoreFutures.allOf(futures));
       } catch (ExecutionException e) {
         if (e.getCause() instanceof FileNotFoundException) {
           throw (FileNotFoundException) e.getCause();

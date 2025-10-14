@@ -50,7 +50,6 @@ from typing import Set
 from typing import Tuple
 from typing import Type
 
-import dill
 import numpy as np
 from fastavro import parse_schema
 from fastavro import schemaless_reader
@@ -58,6 +57,8 @@ from fastavro import schemaless_writer
 
 from apache_beam.coders import observable
 from apache_beam.coders.avro_record import AvroRecord
+from apache_beam.internal import cloudpickle_pickler
+from apache_beam.internal.cloudpickle import cloudpickle
 from apache_beam.typehints.schemas import named_tuple_from_schema
 from apache_beam.utils import proto_utils
 from apache_beam.utils import windowed_value
@@ -70,6 +71,11 @@ try:
   import dataclasses
 except ImportError:
   dataclasses = None  # type: ignore
+
+try:
+  import dill
+except ImportError:
+  dill = None
 
 if TYPE_CHECKING:
   import proto
@@ -354,14 +360,32 @@ NESTED_STATE_TYPE = 104
 _ITERABLE_LIKE_TYPES = set()  # type: Set[Type]
 
 
+def _verify_dill_compat():
+  base_error = (
+      "This pipeline runs with the pipeline option "
+      "--update_compatibility_version=2.67.0 or earlier. "
+      "When running with this option on SDKs 2.68.0 or "
+      "later, you must ensure dill==0.3.1.1 is installed.")
+  if not dill:
+    raise RuntimeError(base_error + ". Dill is not installed.")
+  if dill.__version__ != "0.3.1.1":
+    raise RuntimeError(base_error + f". Found dill version '{dill.__version__}")
+
+
 class FastPrimitivesCoderImpl(StreamCoderImpl):
   """For internal use only; no backwards-compatibility guarantees."""
   def __init__(
-      self, fallback_coder_impl, requires_deterministic_step_label=None):
+      self,
+      fallback_coder_impl,
+      requires_deterministic_step_label=None,
+      force_use_dill=False,
+      use_relative_filepaths=True):
     self.fallback_coder_impl = fallback_coder_impl
     self.iterable_coder_impl = IterableCoderImpl(self)
     self.requires_deterministic_step_label = requires_deterministic_step_label
     self.warn_deterministic_fallback = True
+    self.force_use_dill = force_use_dill
+    self.use_relative_filepaths = use_relative_filepaths
 
   @staticmethod
   def register_iterable_like_type(t):
@@ -525,10 +549,32 @@ class FastPrimitivesCoderImpl(StreamCoderImpl):
         "please provide a type hint for the input of '%s'" %
         (value, type(value), self.requires_deterministic_step_label))
 
+  def encode_type_2_67_0(self, t, stream):
+    """
+    Encode special type with <=2.67.0 compatibility.
+    """
+    if t not in _pickled_types:
+      _verify_dill_compat()
+      _pickled_types[t] = dill.dumps(t)
+    stream.write(_pickled_types[t], True)
+
   def encode_type(self, t, stream):
-    stream.write(dill.dumps(t), True)
+    if self.force_use_dill:
+      return self.encode_type_2_67_0(t, stream)
+
+    if t not in _pickled_types:
+      config = cloudpickle.CloudPickleConfig(
+          id_generator=None,
+          skip_reset_dynamic_type_state=True,
+          filepath_interceptor=cloudpickle.get_relative_path)
+      if not self.use_relative_filepaths:
+        config.filepath_interceptor = None
+      _pickled_types[t] = cloudpickle_pickler.dumps(t, config=config)
+    stream.write(_pickled_types[t], True)
 
   def decode_type(self, stream):
+    if self.force_use_dill:
+      return _unpickle_type_2_67_0(stream.read_all(True))
     return _unpickle_type(stream.read_all(True))
 
   def decode_from_stream(self, stream, nested):
@@ -586,20 +632,37 @@ class FastPrimitivesCoderImpl(StreamCoderImpl):
       raise ValueError('Unknown type tag %x' % t)
 
 
+_pickled_types = {}  # type: Dict[type, bytes]
 _unpickled_types = {}  # type: Dict[bytes, type]
 
 
-def _unpickle_type(bs):
+def _unpickle_type_2_67_0(bs):
+  """
+  Decode special type with <=2.67.0 compatibility.
+  """
   t = _unpickled_types.get(bs, None)
   if t is None:
+    _verify_dill_compat()
     t = _unpickled_types[bs] = dill.loads(bs)
     # Fix unpicklable anonymous named tuples for Python 3.6.
     if t.__base__ is tuple and hasattr(t, '_fields'):
       try:
         pickle.loads(pickle.dumps(t))
       except pickle.PicklingError:
-        t.__reduce__ = lambda self: (_unpickle_named_tuple, (bs, tuple(self)))
+        t.__reduce__ = lambda self: (
+            _unpickle_named_tuple_2_67_0, (bs, tuple(self)))
   return t
+
+
+def _unpickle_named_tuple_2_67_0(bs, items):
+  return _unpickle_type_2_67_0(bs)(*items)
+
+
+def _unpickle_type(bs):
+  if not _unpickled_types.get(bs, None):
+    _unpickled_types[bs] = cloudpickle_pickler.loads(bs)
+
+  return _unpickled_types[bs]
 
 
 def _unpickle_named_tuple(bs, items):
@@ -679,8 +742,7 @@ class MapCoderImpl(StreamCoderImpl):
       self,
       key_coder,  # type: CoderImpl
       value_coder,  # type: CoderImpl
-      is_deterministic = False
-  ):
+      is_deterministic=False):
     self._key_coder = key_coder
     self._value_coder = value_coder
     self._is_deterministic = is_deterministic
@@ -838,6 +900,7 @@ class IntervalWindowCoderImpl(StreamCoderImpl):
       if IntervalWindow is None:
         from apache_beam.transforms.window import IntervalWindow
     # instantiating with None is not part of the public interface
+    # pylint: disable=too-many-function-args
     typed_value = IntervalWindow(None, None)  # type: ignore[arg-type]
     typed_value._end_micros = (
         1000 * self._to_normal_time(in_.read_bigendian_uint64()))
@@ -974,6 +1037,37 @@ class VarIntCoderImpl(StreamCoderImpl):
     return get_varint_size(value)
 
 
+class VarInt32CoderImpl(StreamCoderImpl):
+  """For internal use only; no backwards-compatibility guarantees.
+
+  A coder for int32 objects."""
+  def encode_to_stream(self, value, out, nested):
+    # type: (int, create_OutputStream, bool) -> None
+    out.write_var_int32(value)
+
+  def decode_from_stream(self, in_stream, nested):
+    # type: (create_InputStream, bool) -> int
+    return in_stream.read_var_int32()
+
+  def encode(self, value):
+    ivalue = value  # type cast
+    if 0 <= ivalue < len(small_ints):
+      return small_ints[ivalue]
+    return StreamCoderImpl.encode(self, value)
+
+  def decode(self, encoded):
+    if len(encoded) == 1:
+      i = ord(encoded)
+      if 0 <= i < 128:
+        return i
+    return StreamCoderImpl.decode(self, encoded)
+
+  def estimate_size(self, value, nested=False):
+    # type: (Any, bool) -> int
+    # Note that VarInts are encoded the same way regardless of nesting.
+    return get_varint_size(int(value) & 0xFFFFFFFF)
+
+
 class SingletonCoderImpl(CoderImpl):
   """For internal use only; no backwards-compatibility guarantees.
 
@@ -1030,8 +1124,8 @@ class AbstractComponentCoderImpl(StreamCoderImpl):
     # type: (create_InputStream, bool) -> Any
     return self._construct_from_components([
         c.decode_from_stream(
-            in_stream, nested or i + 1 < len(self._coder_impls)) for i,
-        c in enumerate(self._coder_impls)
+            in_stream, nested or i + 1 < len(self._coder_impls))
+        for i, c in enumerate(self._coder_impls)
     ])
 
   def estimate_size(self, value, nested=False):
@@ -1802,9 +1896,11 @@ class RowCoderImpl(StreamCoderImpl):
       enc_posx = list(
           set(field.encoding_position for field in self.schema.fields))
       if len(enc_posx) != len(self.schema.fields):
+        names_no_pos = ", ".join(
+            [f.name for f in self.schema.fields if f.encoding_position is None])
         raise ValueError(
             f'''Schema with id {schema.id} has encoding_positions_set=True,
-            but not all fields have encoding_position set''')
+            but found fields without encoding_position set: {names_no_pos}''')
       self.encoding_positions = list(
           field.encoding_position for field in self.schema.fields)
     self.encoding_positions_argsort = list(np.argsort(self.encoding_positions))
@@ -1859,8 +1955,7 @@ class RowCoderImpl(StreamCoderImpl):
         RowColumnEncoder.create(
             self.schema.fields[i].type.atomic_type,
             self.components[i],
-            columns[name]) for i,
-        name in enumerate(self.field_names)
+            columns[name]) for i, name in enumerate(self.field_names)
     ]
 
   def encode_batch_to_stream(self, columns: Dict[str, np.ndarray], out):

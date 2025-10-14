@@ -42,6 +42,8 @@ from typing import Type
 from typing import Union
 from typing import cast
 
+from apache_beam.internal.metrics.cells import HistogramCellFactory
+from apache_beam.internal.metrics.cells import HistogramData
 from apache_beam.metrics import monitoring_infos
 from apache_beam.metrics.cells import BoundedTrieCell
 from apache_beam.metrics.cells import CounterCell
@@ -287,41 +289,42 @@ class MetricsContainer(object):
     """
     counters = {
         MetricKey(self.step_name, k.metric_name): v.get_cumulative()
-        for k,
-        v in self.metrics.items() if k.cell_type == CounterCell
+        for k, v in self.metrics.items() if k.cell_type == CounterCell
     }
 
     distributions = {
         MetricKey(self.step_name, k.metric_name): v.get_cumulative()
-        for k,
-        v in self.metrics.items() if k.cell_type == DistributionCell
+        for k, v in self.metrics.items() if k.cell_type == DistributionCell
     }
 
     gauges = {
         MetricKey(self.step_name, k.metric_name): v.get_cumulative()
-        for k,
-        v in self.metrics.items() if k.cell_type == GaugeCell
+        for k, v in self.metrics.items() if k.cell_type == GaugeCell
     }
 
     string_sets = {
         MetricKey(self.step_name, k.metric_name): v.get_cumulative()
-        for k,
-        v in self.metrics.items() if k.cell_type == StringSetCell
+        for k, v in self.metrics.items() if k.cell_type == StringSetCell
     }
 
     bounded_tries = {
         MetricKey(self.step_name, k.metric_name): v.get_cumulative()
-        for k,
-        v in self.metrics.items() if k.cell_type == BoundedTrieCell
+        for k, v in self.metrics.items() if k.cell_type == BoundedTrieCell
+    }
+
+    histograms = {
+        MetricKey(self.step_name, k.metric_name): v.get_cumulative()
+        for k, v in self.metrics.items()
+        if isinstance(k.cell_type, HistogramCellFactory)
     }
 
     return MetricUpdates(
-        counters, distributions, gauges, string_sets, bounded_tries)
+        counters, distributions, gauges, string_sets, bounded_tries, histograms)
 
   def to_runner_api(self):
     return [
-        cell.to_runner_api_user_metric(key.metric_name) for key,
-        cell in self.metrics.items()
+        cell.to_runner_api_user_metric(key.metric_name)
+        for key, cell in self.metrics.items()
     ]
 
   def to_runner_api_monitoring_infos(self, transform_id):
@@ -332,8 +335,7 @@ class MetricsContainer(object):
       items = list(self.metrics.items())
     all_metrics = [
         cell.to_runner_api_monitoring_info(key.metric_name, transform_id)
-        for key,
-        cell in items
+        for key, cell in items
     ]
     return {
         monitoring_infos.to_key(mi): mi
@@ -371,6 +373,7 @@ class MetricUpdates(object):
       gauges=None,  # type: Optional[Dict[MetricKey, GaugeData]]
       string_sets=None,  # type: Optional[Dict[MetricKey, StringSetData]]
       bounded_tries=None,  # type: Optional[Dict[MetricKey, BoundedTrieData]]
+      histograms=None,  # type: Optional[Dict[MetricKey, HistogramData]]
   ):
     # type: (...) -> None
 
@@ -388,3 +391,4 @@ class MetricUpdates(object):
     self.gauges = gauges or {}
     self.string_sets = string_sets or {}
     self.bounded_tries = bounded_tries or {}
+    self.histograms = histograms or {}

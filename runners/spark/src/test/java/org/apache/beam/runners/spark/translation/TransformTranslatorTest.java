@@ -20,6 +20,7 @@ package org.apache.beam.runners.spark.translation;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.io.Serializable;
@@ -37,16 +38,18 @@ import org.apache.beam.runners.spark.util.ByteArray;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VarIntCoder;
+import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterators;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
@@ -79,8 +82,8 @@ public class TransformTranslatorTest implements Serializable {
   @Test
   public void testSplitBySameKey() {
     VarIntCoder coder = VarIntCoder.of();
-    WindowedValue.WindowedValueCoder<Integer> wvCoder =
-        WindowedValue.FullWindowedValueCoder.of(coder, GlobalWindow.Coder.INSTANCE);
+    WindowedValues.WindowedValueCoder<Integer> wvCoder =
+        WindowedValues.FullWindowedValueCoder.of(coder, GlobalWindow.Coder.INSTANCE);
     Instant now = Instant.now();
     List<GlobalWindow> window = Collections.singletonList(GlobalWindow.INSTANCE);
     PaneInfo paneInfo = PaneInfo.NO_FIRING;
@@ -88,23 +91,25 @@ public class TransformTranslatorTest implements Serializable {
         Arrays.asList(
             new Tuple2(
                 new ByteArray(CoderHelpers.toByteArrayWithTs(1, coder, now)),
-                CoderHelpers.toByteArray(WindowedValue.of(1, now, window, paneInfo), wvCoder)),
+                CoderHelpers.toByteArray(WindowedValues.of(1, now, window, paneInfo), wvCoder)),
             new Tuple2(
                 new ByteArray(
                     CoderHelpers.toByteArrayWithTs(1, coder, now.plus(Duration.millis(1)))),
                 CoderHelpers.toByteArray(
-                    WindowedValue.of(2, now.plus(Duration.millis(1)), window, paneInfo), wvCoder)));
+                    WindowedValues.of(2, now.plus(Duration.millis(1)), window, paneInfo),
+                    wvCoder)));
 
     List<Tuple2<ByteArray, byte[]>> secondKey =
         Arrays.asList(
             new Tuple2(
                 new ByteArray(CoderHelpers.toByteArrayWithTs(2, coder, now)),
-                CoderHelpers.toByteArray(WindowedValue.of(3, now, window, paneInfo), wvCoder)),
+                CoderHelpers.toByteArray(WindowedValues.of(3, now, window, paneInfo), wvCoder)),
             new Tuple2(
                 new ByteArray(
                     CoderHelpers.toByteArrayWithTs(2, coder, now.plus(Duration.millis(2)))),
                 CoderHelpers.toByteArray(
-                    WindowedValue.of(4, now.plus(Duration.millis(2)), window, paneInfo), wvCoder)));
+                    WindowedValues.of(4, now.plus(Duration.millis(2)), window, paneInfo),
+                    wvCoder)));
 
     Iterable<Tuple2<ByteArray, byte[]>> concat = Iterables.concat(firstKey, secondKey);
     Iterator<Iterator<WindowedValue<KV<Integer, Integer>>>> keySplit;
@@ -118,15 +123,15 @@ public class TransformTranslatorTest implements Serializable {
         // first key
         assertEquals(
             Arrays.asList(
-                WindowedValue.of(KV.of(1, 1), now, window, paneInfo),
-                WindowedValue.of(KV.of(1, 2), now.plus(Duration.millis(1)), window, paneInfo)),
+                WindowedValues.of(KV.of(1, 1), now, window, paneInfo),
+                WindowedValues.of(KV.of(1, 2), now.plus(Duration.millis(1)), window, paneInfo)),
             list);
       } else {
         // second key
         assertEquals(
             Arrays.asList(
-                WindowedValue.of(KV.of(2, 3), now, window, paneInfo),
-                WindowedValue.of(KV.of(2, 4), now.plus(Duration.millis(2)), window, paneInfo)),
+                WindowedValues.of(KV.of(2, 3), now, window, paneInfo),
+                WindowedValues.of(KV.of(2, 4), now.plus(Duration.millis(2)), window, paneInfo)),
             list);
       }
     }
@@ -165,7 +170,7 @@ public class TransformTranslatorTest implements Serializable {
   }
 
   @Test
-  public void testMultipleOutputPardoHaveFilter() {
+  public void testMultipleOutputParDoShouldNotHaveFilterWhenSideOutputIsNotConsumed() {
     Pipeline p = Pipeline.create();
     TupleTag<String> tag1 = new TupleTag<String>("tag1") {};
     TupleTag<String> tag2 = new TupleTag<String>("tag2") {};
@@ -186,6 +191,47 @@ public class TransformTranslatorTest implements Serializable {
 
     EvaluationContext ctxt = new EvaluationContext(contextRule.getSparkContext(), p, options);
     SparkRunner.initAccumulators(options, ctxt.getSparkContext());
+    SparkRunner.updateDependentTransforms(p, translator, ctxt);
+
+    p.traverseTopologically(new SparkRunner.Evaluator(translator, ctxt));
+
+    // check main output for filter
+    @SuppressWarnings("unchecked")
+    BoundedDataset<String> dataset =
+        (BoundedDataset<String>) ctxt.borrowDataset(pCollectionTuple.get(tag1));
+    List<RDDNode> parsed = RDDTreeParser.parse(dataset.getRDD().toDebugString());
+    assertThat(parsed.stream().map(RDDNode::getOperator)).doesNotContain("filter");
+
+    // check that second tag is not present
+    assertNull(ctxt.borrowDataset(pCollectionTuple.get(tag2)));
+  }
+
+  @Test
+  public void testMultipleOutputParDoShouldHaveFilterWhenSideOutputIsConsumed() {
+    Pipeline p = Pipeline.create();
+    TupleTag<String> tag1 = new TupleTag<String>("tag1") {};
+    TupleTag<String> tag2 = new TupleTag<String>("tag2") {};
+
+    SparkPipelineOptions options = contextRule.createPipelineOptions();
+    TransformTranslator.Translator translator = new TransformTranslator.Translator();
+
+    PTransform<PBegin, PCollection<String>> createTransform = Create.of("foo", "bar");
+
+    PassThrough.MultipleOutput<String> passThroughTransform =
+        PassThrough.ofMultipleOutput(tag1, tag2);
+
+    PCollectionTuple pCollectionTuple =
+        p.apply("Create Values", createTransform)
+            .apply("Multiple Output PassThrough", passThroughTransform);
+
+    // consume side output
+    pCollectionTuple.get(tag2).apply(Count.globally());
+
+    p.replaceAll(SparkTransformOverrides.getDefaultOverrides(false));
+
+    EvaluationContext ctxt = new EvaluationContext(contextRule.getSparkContext(), p, options);
+    SparkRunner.initAccumulators(options, ctxt.getSparkContext());
+    SparkRunner.updateDependentTransforms(p, translator, ctxt);
 
     p.traverseTopologically(new SparkRunner.Evaluator(translator, ctxt));
 

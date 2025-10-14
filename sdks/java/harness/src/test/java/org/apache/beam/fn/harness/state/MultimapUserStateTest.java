@@ -21,6 +21,7 @@ import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.emptyIterable;
+import static org.hamcrest.collection.ArrayMatching.arrayContainingInAnyOrder;
 import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -43,7 +44,7 @@ import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.fn.stream.PrefetchableIterable;
 import org.apache.beam.sdk.util.ByteStringOutputStream;
 import org.apache.beam.sdk.values.KV;
-import org.apache.beam.vendor.grpc.v1p60p1.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.junit.Test;
@@ -167,7 +168,9 @@ public class MultimapUserStateTest {
     userState.put(A3, "V1");
     userState.put(A1, "V3");
     assertArrayEquals(new byte[][] {A1, A2}, Iterables.toArray(initKeys, byte[].class));
-    assertArrayEquals(new byte[][] {A1, A2, A3}, Iterables.toArray(userState.keys(), byte[].class));
+    assertThat(
+        Iterables.toArray(userState.keys(), byte[].class),
+        is(arrayContainingInAnyOrder(A1, A2, A3)));
 
     userState.clear();
     assertArrayEquals(new byte[][] {A1, A2}, Iterables.toArray(initKeys, byte[].class));
@@ -822,8 +825,9 @@ public class MultimapUserStateTest {
 
       userState.put(A2, "V1");
       userState.put(A3, "V1");
-      assertArrayEquals(
-          new byte[][] {A1, A2, A3}, Iterables.toArray(userState.keys(), byte[].class));
+      assertThat(
+          Iterables.toArray(userState.keys(), byte[].class),
+          is(arrayContainingInAnyOrder(A1, A2, A3)));
       userState.asyncClose();
     }
 
@@ -841,8 +845,9 @@ public class MultimapUserStateTest {
               ByteArrayCoder.of(),
               StringUtf8Coder.of());
 
-      assertArrayEquals(
-          new byte[][] {A1, A2, A3}, Iterables.toArray(userState.keys(), byte[].class));
+      assertThat(
+          Iterables.toArray(userState.keys(), byte[].class),
+          is(arrayContainingInAnyOrder(A1, A2, A3)));
       userState.asyncClose();
     }
   }

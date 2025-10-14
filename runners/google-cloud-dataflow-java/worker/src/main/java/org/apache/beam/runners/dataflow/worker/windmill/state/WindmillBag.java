@@ -31,7 +31,7 @@ import org.apache.beam.sdk.state.BagState;
 import org.apache.beam.sdk.state.ReadableState;
 import org.apache.beam.sdk.util.ByteStringOutputStream;
 import org.apache.beam.sdk.util.Weighted;
-import org.apache.beam.vendor.grpc.v1p60p1.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 
 @SuppressWarnings({
@@ -63,10 +63,11 @@ public class WindmillBag<T> extends SimpleWindmillState implements BagState<T> {
       StateTag<BagState<T>> address,
       String stateFamily,
       Coder<T> elemCoder,
-      boolean isNewKey) {
+      boolean isNewKey,
+      WindmillStateTagUtil windmillStateTagUtil) {
     this.namespace = namespace;
     this.address = address;
-    this.stateKey = WindmillStateUtil.encodeKey(namespace, address);
+    this.stateKey = windmillStateTagUtil.encodeKey(namespace, address);
     this.stateFamily = stateFamily;
     this.elemCoder = elemCoder;
     if (isNewKey) {

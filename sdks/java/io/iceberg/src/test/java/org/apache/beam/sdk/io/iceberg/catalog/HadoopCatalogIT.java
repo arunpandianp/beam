@@ -17,7 +17,6 @@
  */
 package org.apache.beam.sdk.io.iceberg.catalog;
 
-import java.io.IOException;
 import java.util.Map;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.apache.hadoop.conf.Configuration;
@@ -27,26 +26,21 @@ import org.apache.iceberg.hadoop.HadoopCatalog;
 
 public class HadoopCatalogIT extends IcebergCatalogBaseIT {
   @Override
-  public Integer numRecords() {
-    return 100;
+  public String type() {
+    return "hadoop";
   }
 
   @Override
   public Catalog createCatalog() {
     Configuration catalogHadoopConf = new Configuration();
-    catalogHadoopConf.set("fs.gs.project.id", options.getProject());
+    catalogHadoopConf.set("fs.gs.project.id", OPTIONS.getProject());
     catalogHadoopConf.set("fs.gs.auth.type", "APPLICATION_DEFAULT");
 
     HadoopCatalog catalog = new HadoopCatalog();
     catalog.setConf(catalogHadoopConf);
-    catalog.initialize("hadoop_" + catalogName, ImmutableMap.of("warehouse", warehouse));
+    catalog.initialize(catalogName, ImmutableMap.of("warehouse", warehouse));
 
     return catalog;
-  }
-
-  @Override
-  public void catalogCleanup() throws IOException {
-    ((HadoopCatalog) catalog).close();
   }
 
   @Override
@@ -58,6 +52,7 @@ public class HadoopCatalogIT extends IcebergCatalogBaseIT {
             ImmutableMap.<String, String>builder()
                 .put("type", CatalogUtil.ICEBERG_CATALOG_TYPE_HADOOP)
                 .put("warehouse", warehouse)
+                .put("io-impl", "org.apache.iceberg.gcp.gcs.GCSFileIO")
                 .build())
         .build();
   }

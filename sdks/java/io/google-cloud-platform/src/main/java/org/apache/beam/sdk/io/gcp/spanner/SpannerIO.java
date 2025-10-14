@@ -23,6 +23,7 @@ import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsCons
 import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.DEFAULT_INCLUSIVE_END_AT;
 import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.DEFAULT_INCLUSIVE_START_AT;
 import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.DEFAULT_RPC_PRIORITY;
+import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.DEFAULT_WATERMARK_REFRESH_RATE;
 import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.MAX_INCLUSIVE_END_AT;
 import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.THROUGHPUT_WINDOW_SECONDS;
 import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
@@ -51,6 +52,8 @@ import com.google.cloud.spanner.SpannerOptions;
 import com.google.cloud.spanner.Statement;
 import com.google.cloud.spanner.Struct;
 import com.google.cloud.spanner.TimestampBound;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -76,6 +79,7 @@ import org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamMetrics;
 import org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants;
 import org.apache.beam.sdk.io.gcp.spanner.changestreams.MetadataSpannerConfigFactory;
 import org.apache.beam.sdk.io.gcp.spanner.changestreams.action.ActionFactory;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.cache.CacheFactory;
 import org.apache.beam.sdk.io.gcp.spanner.changestreams.dao.DaoFactory;
 import org.apache.beam.sdk.io.gcp.spanner.changestreams.dao.PartitionMetadataTableNames;
 import org.apache.beam.sdk.io.gcp.spanner.changestreams.dofn.CleanUpReadChangeStreamDoFn;
@@ -109,13 +113,17 @@ import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.Wait;
 import org.apache.beam.sdk.transforms.WithTimestamps;
 import org.apache.beam.sdk.transforms.display.DisplayData;
+import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.DefaultTrigger;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
+import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.util.BackOff;
 import org.apache.beam.sdk.util.FluentBackoff;
+import org.apache.beam.sdk.util.OutputBuilderSupplier;
 import org.apache.beam.sdk.util.Sleeper;
+import org.apache.beam.sdk.values.OutputBuilder;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollection.IsBounded;
@@ -128,6 +136,7 @@ import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.sdk.values.TypeDescriptor;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Stopwatch;
@@ -608,6 +617,37 @@ public class SpannerIO {
       return withEmulatorHost(ValueProvider.StaticValueProvider.of(emulatorHost));
     }
 
+    /** Specifies the SpannerOptions experimental host (setExperimentalHost). */
+    public ReadAll withExperimentalHost(ValueProvider<String> experimentalHost) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withExperimentalHost(experimentalHost));
+    }
+
+    public ReadAll withExperimentalHost(String experimentalHost) {
+      return withExperimentalHost(ValueProvider.StaticValueProvider.of(experimentalHost));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public ReadAll withUsingPlainTextChannel(ValueProvider<Boolean> plainText) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withUsingPlainTextChannel(plainText));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public ReadAll withUsingPlainTextChannel(boolean plainText) {
+      return withUsingPlainTextChannel(ValueProvider.StaticValueProvider.of(plainText));
+    }
+
     /** Specifies the Cloud Spanner database. */
     public ReadAll withDatabaseId(ValueProvider<String> databaseId) {
       SpannerConfig config = getSpannerConfig();
@@ -837,6 +877,37 @@ public class SpannerIO {
       return withEmulatorHost(ValueProvider.StaticValueProvider.of(emulatorHost));
     }
 
+    /** Specifies the SpannerOptions experimental host (setExperimentalHost). */
+    public Read withExperimentalHost(ValueProvider<String> experimentalHost) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withExperimentalHost(experimentalHost));
+    }
+
+    public Read withExperimentalHost(String experimentalHost) {
+      return withExperimentalHost(ValueProvider.StaticValueProvider.of(experimentalHost));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public Read withUsingPlainTextChannel(ValueProvider<Boolean> plainText) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withUsingPlainTextChannel(plainText));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public Read withUsingPlainTextChannel(boolean plainText) {
+      return withUsingPlainTextChannel(ValueProvider.StaticValueProvider.of(plainText));
+    }
+
     /** If true the uses Cloud Spanner batch API. */
     public Read withBatching(boolean batching) {
       return toBuilder().setBatching(batching).build();
@@ -1013,6 +1084,32 @@ public class SpannerIO {
     }
   }
 
+  static class ChangeStreamRead extends PTransform<PBegin, PCollection<String>> {
+
+    ReadChangeStream readChangeStream;
+
+    public ChangeStreamRead(ReadChangeStream readChangeStream) {
+      this.readChangeStream = readChangeStream;
+    }
+
+    @Override
+    public PCollection<String> expand(PBegin input) {
+      return input
+          .apply(readChangeStream)
+          .apply("DataChangeRecordToStringJSON", ParDo.of(new DataChangeRecordToJsonFn()));
+    }
+  }
+
+  private static class DataChangeRecordToJsonFn extends DoFn<DataChangeRecord, String> {
+    private static Gson gson = new GsonBuilder().disableHtmlEscaping().create();
+
+    @ProcessElement
+    public void process(@Element DataChangeRecord input, OutputReceiver<String> receiver) {
+      String modJsonString = gson.toJson(input, DataChangeRecord.class);
+      receiver.output(modJsonString);
+    }
+  }
+
   /**
    * A {@link PTransform} that create a transaction. If applied to a {@link PCollection}, it will
    * create a transaction after the {@link PCollection} is closed.
@@ -1105,6 +1202,37 @@ public class SpannerIO {
 
     public CreateTransaction withEmulatorHost(String emulatorHost) {
       return withEmulatorHost(ValueProvider.StaticValueProvider.of(emulatorHost));
+    }
+
+    /** Specifies the SpannerOptions experimental host (setExperimentalHost). */
+    public CreateTransaction withExperimentalHost(ValueProvider<String> experimentalHost) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withExperimentalHost(experimentalHost));
+    }
+
+    public CreateTransaction withExperimentalHost(String experimentalHost) {
+      return withExperimentalHost(ValueProvider.StaticValueProvider.of(experimentalHost));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public CreateTransaction withUsingPlainTextChannel(ValueProvider<Boolean> plainText) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withUsingPlainTextChannel(plainText));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public CreateTransaction withUsingPlainTextChannel(boolean plainText) {
+      return withUsingPlainTextChannel(ValueProvider.StaticValueProvider.of(plainText));
     }
 
     @VisibleForTesting
@@ -1242,6 +1370,37 @@ public class SpannerIO {
 
     public Write withEmulatorHost(String emulatorHost) {
       return withEmulatorHost(ValueProvider.StaticValueProvider.of(emulatorHost));
+    }
+
+    /** Specifies the SpannerOptions experimental host (setExperimentalHost). */
+    public Write withExperimentalHost(ValueProvider<String> experimentalHost) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withExperimentalHost(experimentalHost));
+    }
+
+    public Write withExperimentalHost(String experimentalHost) {
+      return withExperimentalHost(ValueProvider.StaticValueProvider.of(experimentalHost));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public Write withUsingPlainTextChannel(ValueProvider<Boolean> plainText) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withUsingPlainTextChannel(plainText));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public Write withUsingPlainTextChannel(boolean plainText) {
+      return withUsingPlainTextChannel(ValueProvider.StaticValueProvider.of(plainText));
     }
 
     public Write withDialectView(PCollectionView<Dialect> dialect) {
@@ -1594,6 +1753,12 @@ public class SpannerIO {
     @Deprecated
     abstract @Nullable Double getTraceSampleProbability();
 
+    abstract @Nullable Duration getWatermarkRefreshRate();
+
+    abstract @Nullable ValueProvider<String> getExperimentalHost();
+
+    abstract @Nullable ValueProvider<Boolean> getPlainText();
+
     abstract Builder toBuilder();
 
     @AutoValue.Builder
@@ -1616,6 +1781,12 @@ public class SpannerIO {
       abstract Builder setRpcPriority(RpcPriority rpcPriority);
 
       abstract Builder setTraceSampleProbability(Double probability);
+
+      abstract Builder setWatermarkRefreshRate(Duration refreshRate);
+
+      abstract Builder setExperimentalHost(ValueProvider<String> experimentalHost);
+
+      abstract Builder setPlainText(ValueProvider<Boolean> plainText);
 
       abstract ReadChangeStream build();
     }
@@ -1703,6 +1874,42 @@ public class SpannerIO {
       return toBuilder().setTraceSampleProbability(probability).build();
     }
 
+    public ReadChangeStream withWatermarkRefreshRate(Duration refreshRate) {
+      return toBuilder().setWatermarkRefreshRate(refreshRate).build();
+    }
+
+    /** Specifies the experimental host to set on SpannerOptions (setExperimentalHost). */
+    public ReadChangeStream withExperimentalHost(ValueProvider<String> experimentalHost) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withExperimentalHost(experimentalHost));
+    }
+
+    /** Specifies the experimental host to set on SpannerOptions (setExperimentalHost). */
+    public ReadChangeStream withExperimentalHost(String experimentalHost) {
+      return withExperimentalHost(ValueProvider.StaticValueProvider.of(experimentalHost));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public ReadChangeStream withUsingPlainTextChannel(ValueProvider<Boolean> plainText) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withUsingPlainTextChannel(plainText));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public ReadChangeStream withUsingPlainTextChannel(boolean plainText) {
+      return withUsingPlainTextChannel(ValueProvider.StaticValueProvider.of(plainText));
+    }
+
     @Override
     public PCollection<DataChangeRecord> expand(PBegin input) {
       checkArgument(
@@ -1782,8 +1989,8 @@ public class SpannerIO {
               .orElse(PartitionMetadataTableNames.generateRandom(partitionMetadataDatabaseId));
       final String changeStreamName = getChangeStreamName();
       final Timestamp startTimestamp = getInclusiveStartAt();
-      // Uses (Timestamp.MAX - 1ns) at max for end timestamp, because we add 1ns to transform the
-      // interval into a closed-open in the read change stream restriction (prevents overflow)
+      // Uses (Timestamp.MAX - 1ns) at max for end timestamp to indicate this connector is expected
+      // to run forever.
       final Timestamp endTimestamp =
           getInclusiveEndAt().compareTo(MAX_INCLUSIVE_END_AT) > 0
               ? MAX_INCLUSIVE_END_AT
@@ -1803,10 +2010,15 @@ public class SpannerIO {
               metadataDatabaseDialect);
       final ActionFactory actionFactory = new ActionFactory();
 
+      final Duration watermarkRefreshRate =
+          MoreObjects.firstNonNull(getWatermarkRefreshRate(), DEFAULT_WATERMARK_REFRESH_RATE);
+      final CacheFactory cacheFactory = new CacheFactory(daoFactory, watermarkRefreshRate);
+
       final InitializeDoFn initializeDoFn =
           new InitializeDoFn(daoFactory, mapperFactory, startTimestamp, endTimestamp);
       final DetectNewPartitionsDoFn detectNewPartitionsDoFn =
-          new DetectNewPartitionsDoFn(daoFactory, mapperFactory, actionFactory, metrics);
+          new DetectNewPartitionsDoFn(
+              daoFactory, mapperFactory, actionFactory, cacheFactory, metrics);
       final ReadChangeStreamPartitionDoFn readChangeStreamPartitionDoFn =
           new ReadChangeStreamPartitionDoFn(daoFactory, mapperFactory, actionFactory, metrics);
       final PostProcessingMetricsDoFn postProcessingMetricsDoFn =
@@ -2101,20 +2313,34 @@ public class SpannerIO {
     private static class OutputReceiverForFinishBundle
         implements OutputReceiver<Iterable<MutationGroup>> {
 
-      private final FinishBundleContext c;
+      private final OutputBuilderSupplier outputBuilderSupplier;
+      private final DoFn<MutationGroup, Iterable<MutationGroup>>.FinishBundleContext context;
 
-      OutputReceiverForFinishBundle(FinishBundleContext c) {
-        this.c = c;
+      OutputReceiverForFinishBundle(FinishBundleContext context) {
+        this.context = context;
+        this.outputBuilderSupplier =
+            new OutputBuilderSupplier() {
+              @Override
+              public <OutputT> WindowedValues.Builder<OutputT> builder(OutputT value) {
+                return WindowedValues.<OutputT>builder()
+                    .setValue(value)
+                    .setTimestamp(Instant.now())
+                    .setPaneInfo(PaneInfo.NO_FIRING)
+                    .setWindow(GlobalWindow.INSTANCE);
+              }
+            };
       }
 
       @Override
-      public void output(Iterable<MutationGroup> output) {
-        outputWithTimestamp(output, Instant.now());
-      }
-
-      @Override
-      public void outputWithTimestamp(Iterable<MutationGroup> output, Instant timestamp) {
-        c.output(output, timestamp, GlobalWindow.INSTANCE);
+      public OutputBuilder<Iterable<MutationGroup>> builder(Iterable<MutationGroup> value) {
+        return outputBuilderSupplier
+            .builder(value)
+            .setReceiver(
+                wv -> {
+                  for (BoundedWindow window : wv.getWindows()) {
+                    context.output(wv.getValue(), wv.getTimestamp(), window);
+                  }
+                });
       }
     }
   }
@@ -2123,7 +2349,7 @@ public class SpannerIO {
    * Filters MutationGroups larger than the batch size to the output tagged with {@code
    * UNBATCHABLE_MUTATIONS_TAG}.
    *
-   * <p>Testing notes: As batching does not occur during full pipline testing, this DoFn must be
+   * <p>Testing notes: As batching does not occur during full pipeline testing, this DoFn must be
    * tested in isolation.
    */
   @VisibleForTesting
@@ -2418,11 +2644,10 @@ public class SpannerIO {
             }
             LOG.info(
                 "DEADLINE_EXCEEDED writing batch of {} mutations to Cloud Spanner, "
-                    + "retrying after backoff of {}ms\n"
-                    + "({})",
+                    + "retrying after backoff of {}ms",
                 mutations.size(),
                 sleepTimeMsecs,
-                exception.getMessage());
+                exception);
             spannerWriteRetries.inc();
             try {
               sleeper.sleep(sleepTimeMsecs);

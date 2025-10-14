@@ -57,7 +57,7 @@ import org.apache.beam.sdk.values.PInput;
 import org.apache.beam.sdk.values.POutput;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.vendor.grpc.v1p60p1.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Joiner;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
@@ -90,6 +90,8 @@ public class PTransformTranslation {
   public static final String PAR_DO_TRANSFORM_URN = "beam:transform:pardo:v1";
   public static final String FLATTEN_TRANSFORM_URN = "beam:transform:flatten:v1";
   public static final String GROUP_BY_KEY_TRANSFORM_URN = "beam:transform:group_by_key:v1";
+  public static final String GROUP_BY_KEY_WRAPPER_TRANSFORM_URN =
+      "beam:transform:group_by_key_wrapper:v1";
   public static final String IMPULSE_TRANSFORM_URN = "beam:transform:impulse:v1";
   public static final String ASSIGN_WINDOWS_TRANSFORM_URN = "beam:transform:window_into:v1";
   public static final String TEST_STREAM_TRANSFORM_URN = "beam:transform:teststream:v1";

@@ -86,7 +86,7 @@
 
 # pytype: skip-file
 
-import datetime
+import contextlib
 import typing
 
 import numpy as np
@@ -95,10 +95,11 @@ from apache_beam.coders import RowCoder
 from apache_beam.transforms.external import BeamJarExpansionService
 from apache_beam.transforms.external import ExternalTransform
 from apache_beam.transforms.external import NamedTupleBasedPayloadBuilder
+from apache_beam.typehints.schemas import JdbcDateType  # pylint: disable=unused-import
+from apache_beam.typehints.schemas import JdbcTimeType  # pylint: disable=unused-import
 from apache_beam.typehints.schemas import LogicalType
 from apache_beam.typehints.schemas import MillisInstant
 from apache_beam.typehints.schemas import typing_to_runner_api
-from apache_beam.utils.timestamp import Timestamp
 
 __all__ = [
     'WriteToJdbc',
@@ -114,7 +115,8 @@ def default_io_expansion_service(classpath=None):
 
 JdbcConfigSchema = typing.NamedTuple(
     'JdbcConfigSchema',
-    [('location', str), ('config', bytes)],
+    [('location', str), ('config', bytes),
+     ('dataSchema', typing.Optional[bytes])],
 )
 
 Config = typing.NamedTuple(
@@ -249,10 +251,22 @@ class WriteToJdbc(ExternalTransform):
                             max_connections=max_connections,
                             driver_jars=driver_jars,
                             partitions=None,
-                            partition_column=None))),
+                            partition_column=None)),
+                dataSchema=None),
         ),
         expansion_service or default_io_expansion_service(classpath),
     )
+
+
+@contextlib.contextmanager
+def enforce_millis_instant_for_timestamp():
+  old_registry = LogicalType._known_logical_types
+  LogicalType._known_logical_types = old_registry.copy()
+  try:
+    LogicalType.register_logical_type(MillisInstant)
+    yield
+  finally:
+    LogicalType._known_logical_types = old_registry
 
 
 class ReadFromJdbc(ExternalTransform):
@@ -305,7 +319,7 @@ class ReadFromJdbc(ExternalTransform):
       driver_jars=None,
       expansion_service=None,
       classpath=None,
-  ):
+      schema=None):
     """
     Initializes a read operation from Jdbc.
 
@@ -341,8 +355,21 @@ class ReadFromJdbc(ExternalTransform):
                       package (e.g. "org.postgresql:postgresql:42.3.1").
                       By default, this argument includes a Postgres SQL JDBC
                       driver.
+    :param schema: Optional custom schema for the returned rows. If provided,
+                   this should be a NamedTuple type that defines the structure
+                   of the output PCollection elements. This bypasses automatic
+                   schema inference during pipeline construction.
     """
     classpath = classpath or DEFAULT_JDBC_CLASSPATH
+
+    dataSchema = None
+    if schema is not None:
+      with enforce_millis_instant_for_timestamp():
+        # Convert Python schema to Beam Schema proto
+        schema_proto = typing_to_runner_api(schema).row_type.schema
+      # Serialize the proto to bytes for transmission
+      dataSchema = schema_proto.SerializeToString()
+
     super().__init__(
         self.URN,
         NamedTupleBasedPayloadBuilder(
@@ -367,97 +394,8 @@ class ReadFromJdbc(ExternalTransform):
                             max_connections=max_connections,
                             driver_jars=driver_jars,
                             partition_column=partition_column,
-                            partitions=partitions))),
+                            partitions=partitions)),
+                dataSchema=dataSchema),
         ),
         expansion_service or default_io_expansion_service(classpath),
     )
-
-
-@LogicalType.register_logical_type
-class JdbcDateType(LogicalType[datetime.date, MillisInstant, str]):
-  """
-  For internal use only; no backwards-compatibility guarantees.
-
-  Support of Legacy JdbcIO DATE logical type. Deemed to change when Java JDBCIO
-  has been migrated to Beam portable logical types.
-  """
-  def __init__(self, argument=""):
-    pass
-
-  @classmethod
-  def representation_type(cls) -> type:
-    return Timestamp
-
-  @classmethod
-  def urn(cls):
-    return "beam:logical_type:javasdk_date:v1"
-
-  @classmethod
-  def language_type(cls):
-    return datetime.date
-
-  def to_representation_type(self, value: datetime.date) -> Timestamp:
-    return Timestamp.from_utc_datetime(
-        datetime.datetime.combine(
-            value, datetime.datetime.min.time(), tzinfo=datetime.timezone.utc))
-
-  def to_language_type(self, value: Timestamp) -> datetime.date:
-
-    return value.to_utc_datetime().date()
-
-  @classmethod
-  def argument_type(cls):
-    return str
-
-  def argument(self):
-    return ""
-
-  @classmethod
-  def _from_typing(cls, typ):
-    return cls()
-
-
-@LogicalType.register_logical_type
-class JdbcTimeType(LogicalType[datetime.time, MillisInstant, str]):
-  """
-  For internal use only; no backwards-compatibility guarantees.
-
-  Support of Legacy JdbcIO TIME logical type. . Deemed to change when Java
-  JDBCIO has been migrated to Beam portable logical types.
-  """
-  def __init__(self, argument=""):
-    pass
-
-  @classmethod
-  def representation_type(cls) -> type:
-    return Timestamp
-
-  @classmethod
-  def urn(cls):
-    return "beam:logical_type:javasdk_time:v1"
-
-  @classmethod
-  def language_type(cls):
-    return datetime.time
-
-  def to_representation_type(self, value: datetime.date) -> Timestamp:
-    return Timestamp.from_utc_datetime(
-        datetime.datetime.combine(
-            datetime.datetime.utcfromtimestamp(0),
-            value,
-            tzinfo=datetime.timezone.utc))
-
-  def to_language_type(self, value: Timestamp) -> datetime.date:
-
-    return value.to_utc_datetime().time()
-
-  @classmethod
-  def argument_type(cls):
-    return str
-
-  def argument(self):
-    return ""
-
-  @classmethod
-  def _from_typing(cls, typ):
-    return cls()

@@ -49,11 +49,13 @@ Typical usage::
 
 import abc
 import contextlib
+import copy
 import logging
 import os
 import re
 import shutil
 import tempfile
+import threading
 import unicodedata
 import uuid
 from collections import defaultdict
@@ -74,6 +76,7 @@ from typing import Union
 from google.protobuf import message
 
 from apache_beam import pvalue
+from apache_beam.coders import typecoders
 from apache_beam.internal import pickler
 from apache_beam.io.filesystems import FileSystems
 from apache_beam.options.pipeline_options import CrossLanguageOptions
@@ -81,13 +84,14 @@ from apache_beam.options.pipeline_options import DebugOptions
 from apache_beam.options.pipeline_options import PipelineOptions
 from apache_beam.options.pipeline_options import SetupOptions
 from apache_beam.options.pipeline_options import StandardOptions
+from apache_beam.options.pipeline_options import StreamingOptions
 from apache_beam.options.pipeline_options import TypeOptions
 from apache_beam.options.pipeline_options_validator import PipelineOptionsValidator
 from apache_beam.portability import common_urns
 from apache_beam.portability.api import beam_runner_api_pb2
 from apache_beam.runners import PipelineRunner
-from apache_beam.runners import common
 from apache_beam.runners import create_runner
+from apache_beam.runners import pipeline_utils
 from apache_beam.transforms import ParDo
 from apache_beam.transforms import ptransform
 from apache_beam.transforms.display import DisplayData
@@ -109,17 +113,16 @@ if TYPE_CHECKING:
   from apache_beam.runners.runner import PipelineResult
   from apache_beam.transforms import environments
 
-__all__ = ['Pipeline', 'PTransformOverride']
+__all__ = ['Pipeline', 'transform_annotations']
 
 
 class Pipeline(HasDisplayData):
   """A pipeline object that manages a DAG of
-  :class:`~apache_beam.pvalue.PValue` s and their
-  :class:`~apache_beam.transforms.ptransform.PTransform` s.
+  :class:`~apache_beam.transforms.ptransform.PTransform` s
+  and their :class:`~apache_beam.pvalue.PValue` s.
 
-  Conceptually the :class:`~apache_beam.pvalue.PValue` s are the DAG's nodes and
-  the :class:`~apache_beam.transforms.ptransform.PTransform` s computing
-  the :class:`~apache_beam.pvalue.PValue` s are the edges.
+  Conceptually the :class:`~apache_beam.transforms.ptransform.PTransform` s are
+  the DAG's nodes and the :class:`~apache_beam.pvalue.PValue` s are the edges.
 
   All the transforms applied to the pipeline must have distinct full labels.
   If same transform instance needs to be applied then the right shift operator
@@ -170,7 +173,15 @@ class Pipeline(HasDisplayData):
 
     if options is not None:
       if isinstance(options, PipelineOptions):
-        self._options = options
+        # Make a deep copy of options since they could be overwritten in later
+        # steps. However, the 'runner' object within 'options' is excluded from
+        # the deep copy (it is shallow copied) due to potential issues with deep
+        # copying specific runner instances, such as FlumeRunner.
+        saved_runner = options.view_as(StandardOptions).runner
+        options.view_as(StandardOptions).runner = None
+        self._options = copy.deepcopy(options)
+        self._options.view_as(StandardOptions).runner = saved_runner
+        options.view_as(StandardOptions).runner = saved_runner
       else:
         raise ValueError(
             'Parameter options, if specified, must be of type PipelineOptions. '
@@ -186,9 +197,6 @@ class Pipeline(HasDisplayData):
       self._options = PipelineOptions([])
 
     FileSystems.set_options(self._options)
-
-    pickle_library = self._options.view_as(SetupOptions).pickle_library
-    pickler.set_library(pickle_library)
 
     if runner is None:
       runner = self._options.view_as(StandardOptions).runner
@@ -206,11 +214,25 @@ class Pipeline(HasDisplayData):
           'Runner %s is not a PipelineRunner object or the '
           'name of a registered runner.' % runner)
 
+    # Runner can override the default pickler to be used.
+    if (self._options.view_as(SetupOptions).pickle_library == 'default' and
+        runner.default_pickle_library_override()):
+      logging.info(
+          "Runner defaulting to pickling library: %s.",
+          runner.default_pickle_library_override())
+      self._options.view_as(
+          SetupOptions).pickle_library = runner.default_pickle_library_override(
+          )
+    pickler.set_library(self._options.view_as(SetupOptions).pickle_library)
+
     # Validate pipeline options
     errors = PipelineOptionsValidator(self._options, runner).validate()
     if errors:
       raise ValueError(
           'Pipeline has validations errors: \n' + '\n'.join(errors))
+
+    typecoders.registry.update_compatibility_version = self._options.view_as(
+        StreamingOptions).update_compatibility_version
 
     # set default experiments for portable runners
     # (needs to occur prior to pipeline construction)
@@ -224,9 +246,12 @@ class Pipeline(HasDisplayData):
 
     # Default runner to be used.
     self.runner = runner
+
     # Stack of transforms generated by nested apply() calls. The stack will
     # contain a root node as an enclosing (parent) node for top transforms.
-    self.transforms_stack = [AppliedPTransform(None, None, '', None)]
+    self.transforms_stack = [
+        AppliedPTransform(None, None, '', None, None, None)
+    ]
     # Set of transform labels (full labels) applied to the pipeline.
     # If a transform is applied and the full label is already in the set
     # then the transform will have to be cloned with a new label.
@@ -244,6 +269,7 @@ class Pipeline(HasDisplayData):
 
     self._display_data = display_data or {}
     self._error_handlers = []
+    self._annotations_stack = [{}]
 
   def display_data(self):
     # type: () -> Dict[str, Any]
@@ -267,6 +293,24 @@ class Pipeline(HasDisplayData):
 
     """Returns the transform currently on the top of the stack."""
     return self.transforms_stack[-1]
+
+  @contextlib.contextmanager
+  def transform_annotations(self, **annotations):
+    """A context manager for attaching annotations to a set of transforms.
+
+    All transforms applied while this context is active will have these
+    annotations attached. This includes  sub-transforms applied within
+    composite transforms.
+    """
+    self._annotations_stack.append({
+        **self._annotations_stack[-1], **encode_annotations(annotations)
+    })
+    yield
+    self._annotations_stack.pop()
+
+  def _current_annotations(self):
+    """Returns the set of annotations that should be used on apply."""
+    return {**_global_annotations_stack()[-1], **self._annotations_stack[-1]}
 
   def _root_transform(self):
     # type: () -> AppliedPTransform
@@ -310,13 +354,15 @@ class Pipeline(HasDisplayData):
           if replacement_transform is original_transform_node.transform:
             return
           replacement_transform.side_inputs = tuple(
-              original_transform_node.transform.side_inputs)
+              getattr(original_transform_node.transform, 'side_inputs', ()))
 
           replacement_transform_node = AppliedPTransform(
               original_transform_node.parent,
               replacement_transform,
               original_transform_node.full_label,
-              original_transform_node.main_inputs)
+              original_transform_node.main_inputs,
+              None,
+              annotations=original_transform_node.annotations)
 
           # TODO(https://github.com/apache/beam/issues/21178): Merge rather
           # than override.
@@ -534,6 +580,10 @@ class Pipeline(HasDisplayData):
     # type: (Union[bool, str]) -> PipelineResult
 
     """Runs the pipeline. Returns whatever our runner returns after running."""
+    # All pipeline options are finalized at this point.
+    # Call get_all_options to print warnings on invalid options.
+    self.options.get_all_options(
+        retain_unknown_options=True, display_warnings=True)
 
     for error_handler in self._error_handlers:
       error_handler.verify_closed()
@@ -681,6 +731,10 @@ class Pipeline(HasDisplayData):
       return self.apply(
           transform.transform, pvalueish, label or transform.label)
 
+    if not label and isinstance(transform, ptransform._PTransformFnPTransform):
+      # This must be set before label is inspected.
+      transform.set_options(self._options)
+
     if not isinstance(transform, ptransform.PTransform):
       raise TypeError("Expected a PTransform object, got %s" % transform)
 
@@ -725,6 +779,12 @@ class Pipeline(HasDisplayData):
             'streaming jobs.' % full_label)
     self.applied_labels.add(full_label)
 
+    if pvalueish is None:
+      full_label = self._current_transform().full_label
+      raise TypeCheckError(
+          f'Transform "{full_label}" was applied to the output of '
+          f'an object of type None.')
+
     pvalueish, inputs = transform._extract_input_pvalues(pvalueish)
     try:
       if not isinstance(inputs, dict):
@@ -741,7 +801,12 @@ class Pipeline(HasDisplayData):
             'returned %s from %s' % (transform, inputs, pvalueish))
 
     current = AppliedPTransform(
-        self._current_transform(), transform, full_label, inputs)
+        self._current_transform(),
+        transform,
+        full_label,
+        inputs,
+        None,
+        annotations=self._current_annotations())
     self._current_transform().add_part(current)
 
     try:
@@ -750,6 +815,13 @@ class Pipeline(HasDisplayData):
       type_options = self._options.view_as(TypeOptions)
       if type_options.pipeline_type_check:
         transform.type_check_inputs(pvalueish)
+      if isinstance(pvalueish, pvalue.PBegin) and isinstance(transform, ParDo):
+        full_label = self._current_transform().full_label
+        raise TypeCheckError(
+            f"Transform '{full_label}' expects a PCollection as input. "
+            "Got a PBegin/Pipeline instead.")
+
+      self._assert_not_applying_PDone(pvalueish, transform)
 
       pvalueish_result = self.runner.apply(transform, pvalueish, self._options)
 
@@ -769,10 +841,10 @@ class Pipeline(HasDisplayData):
         self._infer_result_type(transform, tuple(inputs.values()), result)
 
         assert isinstance(result.producer.inputs, tuple)
-        # The DoOutputsTuple adds the PCollection to the outputs when accessed
-        # except for the main tag. Add the main tag here.
         if isinstance(result, pvalue.DoOutputsTuple):
-          current.add_output(result, result._main_tag)
+          for tag, pc in list(result._pcolls.items()):
+            if tag not in current.outputs:
+              current.add_output(pc, tag)
           continue
 
         # If there is already a tag with the same name, increase a counter for
@@ -798,6 +870,20 @@ class Pipeline(HasDisplayData):
       self.transforms_stack.pop()
     return pvalueish_result
 
+  def _assert_not_applying_PDone(
+      self,
+      pvalueish,  # type: Optional[pvalue.PValue]
+      transform  # type: ptransform.PTransform
+  ):
+    if isinstance(pvalueish, pvalue.PDone) and isinstance(transform, ParDo):
+      # If the input is a PDone, we cannot apply a ParDo transform.
+      full_label = self._current_transform().full_label
+      producer_label = pvalueish.producer.full_label
+      raise TypeCheckError(
+          f'Transform "{full_label}" was applied to the output of '
+          f'"{producer_label}" but "{producer_label.split("/")[-1]}" '
+          'produces no PCollections.')
+
   def _generate_unique_label(
       self,
       transform  # type: str
@@ -809,7 +895,6 @@ class Pipeline(HasDisplayData):
     """
     unique_suffix = uuid.uuid4().hex[:6]
     return '%s_%s' % (transform.label, unique_suffix)
-
 
   def _infer_result_type(
       self,
@@ -918,6 +1003,11 @@ class Pipeline(HasDisplayData):
       raise ValueError(
           'Only one of context or default_environment may be specified.')
 
+    # The FlumeRunner is the only runner setting this option. Use getattr
+    # because other runners do not have this option.
+    context.enable_best_effort_deterministic_pickling = getattr(
+        self.runner, 'enable_best_effort_deterministic_pickling', False)
+
     # The RunnerAPI spec requires certain transforms and side-inputs to have KV
     # inputs (and corresponding outputs).
     # Currently we only upgrade to KV pairs.  If there is a need for more
@@ -937,7 +1027,9 @@ class Pipeline(HasDisplayData):
         # type: (AppliedPTransform) -> None
         if not transform_node.transform:
           return
-        if transform_node.transform.runner_api_requires_keyed_input():
+        if hasattr(
+            transform_node.transform, 'runner_api_requires_keyed_input'
+        ) and transform_node.transform.runner_api_requires_keyed_input():
           pcoll = transform_node.inputs[0]
           pcoll.element_type = typehints.coerce_to_kv_type(
               pcoll.element_type, transform_node.full_label)
@@ -952,11 +1044,11 @@ class Pipeline(HasDisplayData):
             if (isinstance(output.element_type,
                            typehints.TupleHint.TupleConstraint) and
                 len(output.element_type.tuple_types) == 2 and
-                pcoll.element_type.tuple_types[0] ==
-                output.element_type.tuple_types[0]):
+                pcoll.element_type.tuple_types[0]
+                == output.element_type.tuple_types[0]):
               output.requires_deterministic_key_coder = (
                   deterministic_key_coders and transform_node.full_label)
-        for side_input in transform_node.transform.side_inputs:
+        for side_input in getattr(transform_node.transform, 'side_inputs', []):
           if side_input.requires_keyed_input():
             side_input.pvalue.element_type = typehints.coerce_to_kv_type(
                 side_input.pvalue.element_type,
@@ -990,7 +1082,7 @@ class Pipeline(HasDisplayData):
 
     Mutates proto as contexts may have references to proto.components.
     """
-    common.merge_common_environments(proto, inplace=True)
+    pipeline_utils.merge_common_environments(proto, inplace=True)
 
   @staticmethod
   def from_runner_api(
@@ -1005,8 +1097,10 @@ class Pipeline(HasDisplayData):
     p = Pipeline(
         runner=runner,
         options=options,
-        display_data={str(ix): d
-                      for ix, d in enumerate(proto.display_data)})
+        display_data={
+            str(ix): d
+            for ix, d in enumerate(proto.display_data)
+        })
     from apache_beam.runners import pipeline_context
     context = pipeline_context.PipelineContext(
         proto.components, requirements=proto.requirements)
@@ -1014,7 +1108,7 @@ class Pipeline(HasDisplayData):
       root_transform_id, = proto.root_transform_ids
       p.transforms_stack = [context.transforms.get_by_id(root_transform_id)]
     else:
-      p.transforms_stack = [AppliedPTransform(None, None, '', None)]
+      p.transforms_stack = [AppliedPTransform(None, None, '', None, None, None)]
     # TODO(robertwb): These are only needed to continue construction. Omit?
     p.applied_labels = {
         t.unique_name
@@ -1124,8 +1218,8 @@ class AppliedPTransform(object):
       transform,  # type: Optional[ptransform.PTransform]
       full_label,  # type: str
       main_inputs,  # type: Optional[Mapping[str, Union[pvalue.PBegin, pvalue.PCollection]]]
-      environment_id=None,  # type: Optional[str]
-      annotations=None, # type: Optional[Dict[str, bytes]]
+      environment_id,  # type: Optional[str]
+      annotations,  # type: Optional[Dict[str, bytes]]
   ):
     # type: (...) -> None
     self.parent = parent
@@ -1138,7 +1232,9 @@ class AppliedPTransform(object):
     self.full_label = full_label
     self.main_inputs = dict(main_inputs or {})
 
-    self.side_inputs = tuple() if transform is None else transform.side_inputs
+    self.side_inputs = (
+        tuple() if transform is None else getattr(
+            transform, 'side_inputs', tuple()))
     self.outputs = {}  # type: Dict[Union[str, int, None], pvalue.PValue]
     self.parts = []  # type: List[AppliedPTransform]
     self.environment_id = environment_id if environment_id else None  # type: Optional[str]
@@ -1146,28 +1242,17 @@ class AppliedPTransform(object):
     # once environment is a first-class citizen in Beam graph and we have
     # access to actual environment, not just an id.
     self.resource_hints = dict(
-        transform.get_resource_hints()) if transform else {
-        }  # type: Dict[str, bytes]
+        transform.get_resource_hints()) if transform and hasattr(
+            transform, 'get_resource_hints') else {}  # type: Dict[str, bytes]
 
-    if annotations is None and transform:
-
-      def annotation_to_bytes(key, a: Any) -> bytes:
-        if isinstance(a, bytes):
-          return a
-        elif isinstance(a, str):
-          return a.encode('ascii')
-        elif isinstance(a, message.Message):
-          return a.SerializeToString()
-        else:
-          raise TypeError(
-              'Unknown annotation type %r (type %s) for %s' % (a, type(a), key))
-
+    if transform and hasattr(transform, 'annotations'):
       annotations = {
-          key: annotation_to_bytes(key, a)
-          for key,
-          a in transform.annotations().items()
+          **(annotations or {}), **encode_annotations(transform.annotations())
       }
+
     self.annotations = annotations
+
+    self.display_data = {}
 
   @property
   def inputs(self):
@@ -1316,8 +1401,11 @@ class AppliedPTransform(object):
       assert not self.main_inputs and not self.side_inputs
       return {}
     else:
-      named_inputs = self.transform._named_inputs(
-          self.main_inputs, self.side_inputs)
+      if hasattr(self.transform, '_named_inputs'):
+        named_inputs = self.transform._named_inputs(
+            self.main_inputs, self.side_inputs)
+      else:
+        named_inputs = {}
       if not self.parts:
         for name, pc_out in self.outputs.items():
           if pc_out.producer is not self and pc_out not in named_inputs.values(
@@ -1331,7 +1419,10 @@ class AppliedPTransform(object):
       assert not self.outputs
       return {}
     else:
-      return self.transform._named_outputs(self.outputs)
+      if hasattr(self.transform, '_named_outputs'):
+        return self.transform._named_outputs(self.outputs)
+      else:
+        return {}
 
   def to_runner_api(self, context):
     # type: (PipelineContext) -> beam_runner_api_pb2.PTransform
@@ -1358,7 +1449,9 @@ class AppliedPTransform(object):
               context,
               has_parts=bool(self.parts),
               named_inputs=self.named_inputs())
-        return transform.to_runner_api(context, has_parts=bool(self.parts))
+        elif hasattr(transform, 'to_runner_api'):
+          return transform.to_runner_api(context, has_parts=bool(self.parts))
+        return None
 
     # Iterate over inputs and outputs by sorted key order, so that ids are
     # consistently generated for multiple runs of the same pipeline.
@@ -1372,6 +1465,11 @@ class AppliedPTransform(object):
         (transform_urn not in Pipeline.runner_implemented_transforms())):
       environment_id = context.get_environment_id_for_resource_hints(
           self.resource_hints)
+    if self.transform is not None:
+      display_data = DisplayData.create_from(
+          self.transform, extra_items=self.display_data)
+    else:
+      display_data = None
 
     return beam_runner_api_pb2.PTransform(
         unique_name=self.full_label,
@@ -1382,19 +1480,16 @@ class AppliedPTransform(object):
         ],
         inputs={
             tag: context.pcollections.get_id(pc)
-            for tag,
-            pc in sorted(self.named_inputs().items())
+            for tag, pc in sorted(self.named_inputs().items())
         },
         outputs={
             tag: context.pcollections.get_id(out)
-            for tag,
-            out in sorted(self.named_outputs().items())
+            for tag, out in sorted(self.named_outputs().items())
         },
         environment_id=environment_id,
         annotations=self.annotations,
         # TODO(https://github.com/apache/beam/issues/18012): Add display_data.
-        display_data=DisplayData.create_from(self.transform).to_proto()
-        if self.transform else None)
+        display_data=display_data.to_proto() if display_data else None)
 
   @staticmethod
   def from_runner_api(
@@ -1429,8 +1524,8 @@ class AppliedPTransform(object):
     # TODO(https://github.com/apache/beam/issues/20136): use key, value pairs
     # instead of depending on tags with index as a suffix.
     indexed_side_inputs = [
-        (get_sideinput_index(tag), context.pcollections.get_by_id(id)) for tag,
-        id in proto.inputs.items() if tag in side_input_tags
+        (get_sideinput_index(tag), context.pcollections.get_by_id(id))
+        for tag, id in proto.inputs.items() if tag in side_input_tags
     ]
     side_inputs = [si for _, si in sorted(indexed_side_inputs)]
 
@@ -1442,7 +1537,8 @@ class AppliedPTransform(object):
         environment_id=None,
         annotations=proto.annotations)
 
-    if result.transform and result.transform.side_inputs:
+    if result.transform and hasattr(
+        result.transform, 'side_inputs') and result.transform.side_inputs:
       for si, pcoll in zip(result.transform.side_inputs, side_inputs):
         si.pvalue = pcoll
       result.side_inputs = tuple(result.transform.side_inputs)
@@ -1453,8 +1549,7 @@ class AppliedPTransform(object):
       result.add_part(part)
     result.outputs = {
         None if tag == 'None' else tag: context.pcollections.get_by_id(id)
-        for tag,
-        id in proto.outputs.items()
+        for tag, id in proto.outputs.items()
     }
     # This annotation is expected by some runners.
     if proto.spec.urn == common_urns.primitives.PAR_DO.urn:
@@ -1476,6 +1571,50 @@ class AppliedPTransform(object):
     if self.resource_hints:
       for part in self.parts:
         part._merge_outer_resource_hints()
+
+
+def encode_annotations(annotations: Optional[Dict[str, Any]]):
+  """Encodes non-byte annotation values as bytes."""
+  if not annotations:
+    return {}
+
+  def annotation_to_bytes(key, a: Any) -> bytes:
+    if isinstance(a, bytes):
+      return a
+    elif isinstance(a, str):
+      return a.encode('ascii')
+    elif isinstance(a, message.Message):
+      return a.SerializeToString()
+    else:
+      raise TypeError(
+          'Unknown annotation type %r (type %s) for %s' % (a, type(a), key))
+
+  return {key: annotation_to_bytes(key, a) for (key, a) in annotations.items()}
+
+
+_global_annotations_stack_data = threading.local()
+
+
+def _global_annotations_stack():
+  try:
+    return _global_annotations_stack_data.stack
+  except AttributeError:
+    _global_annotations_stack_data.stack = [{}]
+    return _global_annotations_stack_data.stack
+
+
+@contextlib.contextmanager
+def transform_annotations(**annotations):
+  """A context manager for attaching annotations to a set of transforms.
+
+  All transforms applied while this context is active will have these
+  annotations attached. This includes  sub-transforms applied within
+  composite transforms.
+  """
+  cur_stack = _global_annotations_stack()
+  cur_stack.append({**cur_stack[-1], **encode_annotations(annotations)})
+  yield
+  cur_stack.pop()
 
 
 class PTransformOverride(metaclass=abc.ABCMeta):
@@ -1584,5 +1723,7 @@ class ComponentIdMap(object):
     prefix = self._normalize(
         '%s_%s_%s' %
         (self.namespace, obj_type.__name__, label or type(obj).__name__))[0:100]
+    if isinstance(obj, typecoders.coders.Coder) and obj.version_tag():
+      prefix = "%s_%s" % (prefix, obj.version_tag())
     self._counters[obj_type] += 1
     return '%s_%d' % (prefix, self._counters[obj_type])
