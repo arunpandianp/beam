@@ -286,9 +286,6 @@ final class GrpcGetDataStream
             batch == batches.pollFirst(),
             "Sent GetDataStream request batch removed before send() was complete.");
         checkNotNull((GetDataPhysicalStreamHandler) currentPhysicalStream).sendBatch(batch);
-        // Notify all waiters with requests in this batch as well as the sender
-        // of the next batch (if one exists).
-        batch.notifySent();
       } catch (Exception e) {
         LOG.debug("Batch failed to send on new stream", e);
         // Free waiters if the send() failed.
@@ -472,9 +469,7 @@ final class GrpcGetDataStream
   private void queueRequestAndWait(QueuedRequest request)
       throws InterruptedException, WindmillStreamShutdownException {
     QueuedBatch batch;
-    boolean responsibleForSend = false;
-    @Nullable QueuedBatch prevBatch = null;
-
+    boolean sleepAndSend = false;
     synchronized (this) {
       if (isShutdown) {
         throw shutdownExceptionFor(request);
@@ -485,24 +480,25 @@ final class GrpcGetDataStream
           || !batch.tryAddRequest(
               request, streamingRpcBatchLimit, AbstractWindmillStream.RPC_STREAM_CHUNK_SIZE)) {
         // We need a new batch.
-        prevBatch = batch; // may be null
+        @Nullable QueuedBatch prevBatch = batch; // may be null
         batch = new QueuedBatch();
         batches.addLast(batch);
-        responsibleForSend = true;
         verify(batch.tryAddRequest(request, Integer.MAX_VALUE, Long.MAX_VALUE));
+        if (prevBatch == null) {
+          // If there was not a previous batch wait a little while to improve
+          // batching.
+          sleepAndSend = true;
+        } else {
+          // If the send fails, request.responseStream will be cancelled and
+          // reading responseStream will throw.
+          trySendBatch(batch);
+        }
       }
     }
-    if (responsibleForSend) {
-      if (prevBatch == null) {
-        // If there was not a previous batch wait a little while to improve
-        // batching.
-        sleeper.sleep(1);
-      } else {
-        prevBatch.waitForSendOrFailNotification();
-      }
+    // Sleep outside the synchronized block.
+    if (sleepAndSend) {
+      sleeper.sleep(1);
       trySendBatch(batch);
-      // If the send fails, request.responseStream will be cancelled and
-      // reading responseStream will throw.
     }
   }
 
@@ -532,9 +528,6 @@ final class GrpcGetDataStream
       verify(batch == batches.pollFirst());
       verify(batch.requestsCount() > 0);
       currentGetDataPhysicalStream.sendBatch(batch);
-      // Notify all waiters with requests in this batch as well as the sender
-      // of the next batch (if one exists).
-      batch.notifySent();
     } catch (Exception e) {
       LOG.debug("Batch failed to send", e);
       // Free waiters if the send() failed.

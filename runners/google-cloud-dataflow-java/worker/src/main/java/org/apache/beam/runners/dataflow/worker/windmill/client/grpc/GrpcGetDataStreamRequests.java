@@ -17,21 +17,16 @@
  */
 package org.apache.beam.runners.dataflow.worker.windmill.client.grpc;
 
-import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList.toImmutableList;
-
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
 import javax.annotation.Nullable;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill.GlobalDataRequest;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill.KeyedGetDataRequest;
-import org.apache.beam.runners.dataflow.worker.windmill.client.WindmillStreamShutdownException;
 import org.apache.beam.sdk.util.Preconditions;
-import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -186,12 +181,11 @@ final class GrpcGetDataStreamRequests {
    * Represents a batch of queued requests. Methods are not thread-safe unless commented otherwise.
    */
   static class QueuedBatch {
+
     private final List<QueuedRequest> requests = new ArrayList<>();
     private final HashSet<Long> workTokens = new HashSet<>();
-    private final CountDownLatch sent = new CountDownLatch(1);
     private long byteSize = 0;
     private volatile boolean finalized = false;
-    private volatile boolean failed = false;
 
     /** Returns a read-only view of requests. */
     List<QueuedRequest> requestsView() {
@@ -250,55 +244,11 @@ final class GrpcGetDataStreamRequests {
       return true;
     }
 
-    /**
-     * Let waiting for threads know that the request has been successfully sent.
-     *
-     * @implNote Thread safe.
-     */
-    void notifySent() {
-      sent.countDown();
-    }
-
     /** Let waiting for threads know that a failure occurred. */
     void notifyFailed() {
-      failed = true;
       for (QueuedRequest request : requests) {
         request.getResponseStream().cancel();
       }
-      sent.countDown();
-    }
-
-    /**
-     * Block until notified of a successful send via {@link #notifySent()} or a non-retryable
-     * failure via {@link #notifyFailed()}. On failure, throw an exception for waiters.
-     *
-     * @implNote Thread safe.
-     */
-    void waitForSendOrFailNotification()
-        throws InterruptedException, WindmillStreamShutdownException {
-      sent.await();
-      if (failed) {
-        ImmutableList<String> cancelledRequests = createStreamCancelledErrorMessages();
-        if (!cancelledRequests.isEmpty()) {
-          LOG.error("Requests failed for the following batches: {}", cancelledRequests);
-          throw new WindmillStreamShutdownException(
-              "Requests failed for batch containing "
-                  + String.join(", ", cancelledRequests)
-                  + " ... requests. This is most likely due to the stream being explicitly closed"
-                  + " which happens when the work is marked as invalid on the streaming"
-                  + " backend when key ranges shuffle around. This is transient and corresponding"
-                  + " work will eventually be retried.");
-        }
-
-        throw new WindmillStreamShutdownException("Stream was shutdown while waiting for send.");
-      }
-    }
-
-    private ImmutableList<String> createStreamCancelledErrorMessages() {
-      return requests.stream()
-          .map(QueuedRequest::toString)
-          .limit(STREAM_CANCELLED_ERROR_LOG_LIMIT)
-          .collect(toImmutableList());
     }
   }
 }
