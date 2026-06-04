@@ -82,6 +82,7 @@ public final class Work implements RefreshableWork {
   private volatile TimedState currentState;
   private volatile boolean isFailed;
   private volatile String processingThreadName = "";
+  private volatile @Nullable Runnable onFailureListener = null;
   private final boolean drainMode;
 
   private Work(
@@ -192,6 +193,10 @@ public final class Work implements RefreshableWork {
     return serializedWorkItemSize;
   }
 
+  public String getComputationId() {
+    return processingContext.computationId();
+  }
+
   @Override
   public ShardedKey getShardedKey() {
     return shardedKey;
@@ -243,8 +248,19 @@ public final class Work implements RefreshableWork {
   }
 
   @Override
-  public void setFailed() {
+  public synchronized void setFailed() {
     this.isFailed = true;
+    Runnable listener = onFailureListener;
+    if (listener != null) {
+      listener.run();
+    }
+  }
+
+  public synchronized void setOnFailureListener(@Nullable Runnable listener) {
+    this.onFailureListener = listener;
+    if (isFailed && listener != null) {
+      listener.run();
+    }
   }
 
   public boolean isCommitPending() {
@@ -269,6 +285,10 @@ public final class Work implements RefreshableWork {
     processingContext.workCommitter().accept(Commit.create(commitRequest, computationState, this));
   }
 
+  public Consumer<Commit> workCommitter() {
+    return processingContext.workCommitter();
+  }
+
   public WindmillStateReader createWindmillStateReader() {
     return WindmillStateReader.forWork(this);
   }
@@ -276,6 +296,10 @@ public final class Work implements RefreshableWork {
   @Override
   public WorkId id() {
     return id;
+  }
+
+  public Optional<KeyGroup> getKeyGroup() {
+    return keyGroup;
   }
 
   public void recordGetWorkStreamLatencies(
@@ -389,14 +413,6 @@ public final class Work implements RefreshableWork {
     abstract State state();
 
     abstract Instant startTime();
-  }
-
-  public String getComputationId() {
-    return processingContext.computationId();
-  }
-
-  public Optional<KeyGroup> getKeyGroup() {
-    return keyGroup;
   }
 
   @AutoValue
