@@ -144,7 +144,8 @@ public class StreamingModeExecutionContextTest {
             new HotKeyLogger(),
             /*hotKeyLoggingEnabled=*/ false,
             /*stepName=*/ "stepName",
-            "sourceBytesProcessCounterName");
+            "sourceBytesProcessCounterName",
+            options);
   }
 
   private StreamingModeExecutionContext createTestExecutionContext(
@@ -176,7 +177,8 @@ public class StreamingModeExecutionContextTest {
         new HotKeyLogger(),
         /*hotKeyLoggingEnabled=*/ false,
         /*stepName=*/ "stepName",
-        "sourceBytesProcessCounterName");
+        "sourceBytesProcessCounterName",
+        options);
   }
 
   private static Work createMockWork(Windmill.WorkItem workItem, Watermarks watermarks) {

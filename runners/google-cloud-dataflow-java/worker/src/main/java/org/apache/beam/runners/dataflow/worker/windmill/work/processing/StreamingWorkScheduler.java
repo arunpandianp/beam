@@ -78,6 +78,19 @@ public class StreamingWorkScheduler {
 
   private static final Logger LOG = LoggerFactory.getLogger(StreamingWorkScheduler.class);
 
+  private static class BatchExecutionException extends RuntimeException {
+    private final List<Work> executedWorks;
+
+    BatchExecutionException(Throwable cause, List<Work> executedWorks) {
+      super(cause);
+      this.executedWorks = executedWorks;
+    }
+
+    List<Work> getExecutedWorks() {
+      return executedWorks;
+    }
+  }
+
   private final Supplier<Instant> clock;
   private final ComputationWorkExecutorFactory computationWorkExecutorFactory;
   private final SideInputStateFetcherFactory sideInputStateFetcherFactory;
@@ -278,21 +291,9 @@ public class StreamingWorkScheduler {
       recordProcessingStats(workBatch, outputBuilders, executeWorkResult.stateBytesRead());
       LOG.debug("Processing done for work batch size: {}", workBatch.size());
     } catch (Throwable t) {
-      // OutOfMemoryError that are caught will be rethrown and trigger jvm termination.
-      try {
-        workFailureProcessor.logAndProcessFailure(
-            computationId,
-            ExecutableWork.create(work, (retry, h) -> processWork(computationState, retry, h)),
-            t,
-            invalidWork ->
-                computationState.completeWorkAndScheduleNextWorkForKey(
-                    invalidWork.getShardedKey(), invalidWork.id()));
-      } catch (OutOfMemoryError oom) {
-        throw oom;
-      } catch (Throwable t2) {
-        LOG.warn("Failed to process work failure safely for work {}", work.id(), t2);
-        throw ExceptionUtils.safeWrapThrowableAsException(t2);
-      }
+      List<Work> failedBatch = getFailedWorks(work, t);
+      worksToCleanup = failedBatch;
+      handleProcessWorkFailure(computationState, failedBatch, computationId, work, t);
     } finally {
       recordProcessingTime(stageInfo, worksToCleanup, work, processingStartTimeNanos);
 
@@ -382,7 +383,7 @@ public class StreamingWorkScheduler {
       StreamingModeExecutionContext context = computationWorkExecutor.context();
       if (context.workIsFailed()) {
         throw new WorkItemCancelledException(
-            Preconditions.checkNotNull(context.getWorkItem()).getShardingKey());
+            Preconditions.checkNotNull(context.getFailedWork()).getWorkItem().getShardingKey());
       }
 
       // Retrieve executed works, output builders, and accumulated callbacks from execution context
@@ -401,6 +402,7 @@ public class StreamingWorkScheduler {
           accumulatedCallbacks,
           context.getStateBytesRead() + localSideInputStateFetcher.getBytesRead());
     } catch (Throwable t) {
+      List<Work> executedWorks = getExecutedWorksOrFallback(computationWorkExecutor, work);
       if (computationWorkExecutor != null) {
         // If processing failed due to a thrown exception, close the executionState. Do not
         // return/release the executionState back to computationState as that will lead to this
@@ -411,7 +413,7 @@ public class StreamingWorkScheduler {
             t);
         computationWorkExecutor.invalidate();
       }
-      throw t;
+      throw new BatchExecutionException(t, executedWorks);
     }
   }
 
@@ -434,9 +436,57 @@ public class StreamingWorkScheduler {
       ComputationState computationState,
       List<Work> workBatch,
       List<Windmill.WorkItemCommitRequest.Builder> outputBuilders) {
-    Preconditions.checkState(
-        workBatch.size() == 1, "Expected single-key work batch, got: " + workBatch.size());
-    commitSingleKeyWork(computationState, workBatch.get(0), outputBuilders.get(0));
+    if (workBatch.size() > 1) {
+      commitMultiKeyWorkBatch(computationState, workBatch, outputBuilders);
+    } else {
+      commitSingleKeyWork(computationState, workBatch.get(0), outputBuilders.get(0));
+    }
+  }
+
+  private void commitMultiKeyWorkBatch(
+      ComputationState computationState,
+      List<Work> workBatch,
+      List<Windmill.WorkItemCommitRequest.Builder> outputBuilders) {
+    Windmill.MultiKeyWorkItemCommitRequest.Builder multiKeyBuilder =
+        Windmill.MultiKeyWorkItemCommitRequest.newBuilder();
+
+    // Group by the KeyGroup (from primary work item)
+    Work primaryWork = workBatch.get(0);
+    if (primaryWork.getKeyGroup().isPresent()) {
+      Work.KeyGroup keyGroup = primaryWork.getKeyGroup().get();
+      multiKeyBuilder.setKeyGroup(
+          Windmill.Uint128Proto.newBuilder()
+              .setHigh(keyGroup.high())
+              .setLow(keyGroup.low())
+              .build());
+    }
+
+    for (int i = 0; i < workBatch.size(); i++) {
+      Windmill.WorkItemCommitRequest.Builder builder = outputBuilders.get(i);
+      Work w = workBatch.get(i);
+      if (i == 0) {
+        builder.addAllPerWorkItemLatencyAttributions(w.getLatencyAttributions(sampler));
+      }
+
+      // Aggregate ONLY finalize IDs to the top level
+      multiKeyBuilder.addAllFinalizeIds(builder.getFinalizeIdsList());
+      // Clear only finalize IDs from individual request
+      builder.clearFinalizeIds();
+      // Keep output_messages and pubsub_messages scoped inside builder
+      multiKeyBuilder.addRequests(builder.build());
+    }
+
+    // Transition states of all completed works in the batch to COMMIT_QUEUED and submit
+    for (Work w : workBatch) {
+      w.setState(Work.State.COMMIT_QUEUED);
+    }
+
+    // Package and submit the commit batch transactionally
+    primaryWork
+        .workCommitter()
+        .accept(
+            Commit.createMultiKey(
+                multiKeyBuilder.build(), computationState, ImmutableList.copyOf(workBatch)));
   }
 
   private void commitSingleKeyWork(
@@ -454,6 +504,46 @@ public class StreamingWorkScheduler {
             .addAllPerWorkItemLatencyAttributions(work.getLatencyAttributions(sampler))
             .build();
     work.queueCommit(validatedCommitRequest, computationState);
+  }
+
+  private static List<Work> getFailedWorks(Work work, Throwable t) {
+    if (t instanceof BatchExecutionException) {
+      return ((BatchExecutionException) t).getExecutedWorks();
+    }
+    return ImmutableList.of(work);
+  }
+
+  private void handleProcessWorkFailure(
+      ComputationState computationState,
+      List<Work> failedBatch,
+      String computationId,
+      Work primaryWork,
+      Throwable t) {
+    try {
+      Throwable errorToProcess = t;
+      if (t instanceof BatchExecutionException && t.getCause() != null) {
+        errorToProcess = t.getCause();
+      }
+
+      List<ExecutableWork> executableWorks = new ArrayList<>();
+      for (Work w : failedBatch) {
+        executableWorks.add(
+            ExecutableWork.create(w, (retry, h) -> processWork(computationState, retry, h)));
+      }
+
+      workFailureProcessor.logAndProcessFailureBatch(
+          computationId,
+          executableWorks,
+          errorToProcess,
+          invalidWork ->
+              computationState.completeWorkAndScheduleNextWorkForKey(
+                  invalidWork.getShardedKey(), invalidWork.id()));
+    } catch (OutOfMemoryError oom) {
+      throw oom;
+    } catch (Throwable t2) {
+      LOG.warn("Failed to process work failure safely for work {}", primaryWork.id(), t2);
+      throw ExceptionUtils.safeWrapThrowableAsException(t2);
+    }
   }
 
   private void recordProcessingTime(
@@ -491,6 +581,16 @@ public class StreamingWorkScheduler {
       newWork.setProcessingThreadName(Thread.currentThread().getName());
       oldWork.setProcessingThreadName("");
     };
+  }
+
+  private static List<Work> getExecutedWorksOrFallback(
+      @Nullable ComputationWorkExecutor computationWorkExecutor, Work fallbackWork) {
+    if (computationWorkExecutor == null) {
+      return ImmutableList.of(fallbackWork);
+    }
+    ImmutableList<Work> executedWorks =
+        ImmutableList.copyOf(computationWorkExecutor.context().getExecutedWorks());
+    return executedWorks.isEmpty() ? ImmutableList.of(fallbackWork) : executedWorks;
   }
 
   @AutoValue

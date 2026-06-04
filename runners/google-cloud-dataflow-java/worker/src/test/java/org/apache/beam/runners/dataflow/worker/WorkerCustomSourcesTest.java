@@ -630,12 +630,14 @@ public class WorkerCustomSourcesTest {
                 PipelineOptionsFactory.create(),
                 "test-work-item-id"),
             executionStateRegistry,
+            globalConfigHandle,
             Long.MAX_VALUE,
             /*throwExceptionOnLargeOutput=*/ false,
             new HotKeyLogger(),
             /*hotKeyLoggingEnabled=*/ false,
             /*stepName=*/ "stepName",
-            "sourceBytesProcessCounterName");
+            "sourceBytesProcessCounterName",
+            options);
 
     options.setNumWorkers(5);
     int maxElements = 10;
@@ -1007,7 +1009,8 @@ public class WorkerCustomSourcesTest {
             new HotKeyLogger(),
             /*hotKeyLoggingEnabled=*/ false,
             /*stepName=*/ "stepName",
-            "sourceBytesProcessCounterName");
+            "sourceBytesProcessCounterName",
+            options);
 
     options.setNumWorkers(5);
     int maxElements = 100;

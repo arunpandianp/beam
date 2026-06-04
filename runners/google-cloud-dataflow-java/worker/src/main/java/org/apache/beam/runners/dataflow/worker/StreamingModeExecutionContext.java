@@ -35,6 +35,7 @@ import java.util.NavigableSet;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.annotation.concurrent.NotThreadSafe;
 import org.apache.beam.repackaged.core.org.apache.commons.lang3.tuple.Pair;
@@ -51,6 +52,7 @@ import org.apache.beam.runners.dataflow.worker.counters.CounterFactory;
 import org.apache.beam.runners.dataflow.worker.counters.NameContext;
 import org.apache.beam.runners.dataflow.worker.profiler.ScopedProfiler.ProfileScope;
 import org.apache.beam.runners.dataflow.worker.streaming.BoundedQueueExecutorWorkHandle;
+import org.apache.beam.runners.dataflow.worker.streaming.ExecutableWork;
 import org.apache.beam.runners.dataflow.worker.streaming.Watermarks;
 import org.apache.beam.runners.dataflow.worker.streaming.Work;
 import org.apache.beam.runners.dataflow.worker.streaming.config.StreamingGlobalConfig;
@@ -79,6 +81,8 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.io.UnboundedSource;
 import org.apache.beam.sdk.io.UnboundedSource.UnboundedReader;
 import org.apache.beam.sdk.metrics.MetricsContainer;
+import org.apache.beam.sdk.options.ExperimentalOptions;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.transforms.DoFn.BundleFinalizer;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
@@ -191,6 +195,11 @@ public class StreamingModeExecutionContext
   private long stateBytesRead = 0;
   private final String sourceBytesProcessCounterName;
 
+  private final int maxKeyGroupBatchSize;
+  private final long maxKeyGroupBatchTimeNanos;
+  private int workItemsPolled = 0;
+  private long bundleStartTimeNanos = 0;
+
   public StreamingModeExecutionContext(
       CounterFactory counterFactory,
       String computationId,
@@ -206,7 +215,8 @@ public class StreamingModeExecutionContext
       HotKeyLogger hotKeyLogger,
       boolean hotKeyLoggingEnabled,
       String stepName,
-      String sourceBytesProcessCounterName) {
+      String sourceBytesProcessCounterName,
+      PipelineOptions options) {
     super(
         counterFactory,
         metricsContainerRegistry,
@@ -225,6 +235,16 @@ public class StreamingModeExecutionContext
     this.hotKeyLoggingEnabled = hotKeyLoggingEnabled;
     this.stepName = checkNotNull(stepName);
     this.sourceBytesProcessCounterName = checkNotNull(sourceBytesProcessCounterName);
+
+    // Initialize batch limits from pipeline options
+    String batchSizeStr =
+        ExperimentalOptions.getExperimentValue(options, "max_key_group_batch_size");
+    this.maxKeyGroupBatchSize = batchSizeStr != null ? Integer.parseInt(batchSizeStr) : 100;
+
+    String batchTimeStr =
+        ExperimentalOptions.getExperimentValue(options, "max_key_group_batch_time_ms");
+    this.maxKeyGroupBatchTimeNanos =
+        TimeUnit.MILLISECONDS.toNanos(batchTimeStr != null ? Long.parseLong(batchTimeStr) : 100);
   }
 
   @VisibleForTesting
@@ -246,6 +266,10 @@ public class StreamingModeExecutionContext
 
   public boolean workIsFailed() {
     return workIsFailed;
+  }
+
+  public @Nullable Work getFailedWork() {
+    return executedWorks.stream().filter(Work::isFailed).findFirst().orElse(null);
   }
 
   public boolean getDrainMode() {
@@ -314,6 +338,8 @@ public class StreamingModeExecutionContext
     this.backlogBytes = UnboundedReader.BACKLOG_UNKNOWN;
     clearSinkFullHint();
     this.stateBytesRead = 0;
+    this.workItemsPolled = 1;
+    this.bundleStartTimeNanos = System.nanoTime();
 
     StreamingGlobalConfig config = globalConfigHandle.getConfig();
     // Snapshot the limits for entire bundle processing.
@@ -686,7 +712,55 @@ public class StreamingModeExecutionContext
   }
 
   public boolean advance() {
+    if (workIsFailed()) {
+      Work failedWork = getFailedWork();
+      throw new WorkItemCancelledException(
+          failedWork != null
+              ? failedWork.getWorkItem().getShardingKey()
+              : work.getWorkItem().getShardingKey());
+    }
+
+    if (workQueueExecutor == null || budgetHandle == null || work == null) {
+      return false;
+    }
+
+    if (shouldStopBatching()) {
+      return false;
+    }
+
+    // 4. Poll next work item in the same key group
+    if (work.getKeyGroup().isPresent()) {
+      Optional<ExecutableWork> additionalWorkOpt =
+          workQueueExecutor.pollWork(computationId, work.getKeyGroup().get(), budgetHandle);
+      if (additionalWorkOpt.isPresent()) {
+        Work oldWork = work;
+        Work newWork = additionalWorkOpt.get().work();
+        workItemsPolled++;
+
+        // 6. Trigger listener to align MDC logging context and metrics
+        if (keySwitchListener != null) {
+          keySwitchListener.onKeySwitch(oldWork, newWork);
+        }
+
+        // 7. Bind the context to Key B internally
+        startForNewKey(newWork);
+        return true;
+      }
+    }
+
     return false;
+  }
+
+  private boolean shouldStopBatching() {
+    if (workItemsPolled >= maxKeyGroupBatchSize) {
+      return true;
+    }
+    long elapsedNanos = System.nanoTime() - bundleStartTimeNanos;
+    return elapsedNanos >= maxKeyGroupBatchTimeNanos;
+  }
+
+  private void startForNewKey(Work newWork) {
+    startForNewKey(newWork, newWork.createWindmillStateReader());
   }
 
   private void startForNewKey(Work newWork, WindmillStateReader reader) {

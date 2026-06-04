@@ -282,7 +282,8 @@ final class ComputationWorkExecutorFactory {
         hotKeyLogger,
         hotKeyLoggingEnabled,
         stepName,
-        computationState.sourceBytesProcessCounterName());
+        computationState.sourceBytesProcessCounterName(),
+        options);
   }
 
   private DataflowMapTaskExecutor createMapTaskExecutor(
