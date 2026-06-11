@@ -15,24 +15,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.beam.runners.dataflow.worker;
+package org.apache.beam.sdk.testing;
 
-import javax.annotation.Nullable;
+import org.apache.beam.sdk.annotations.Internal;
 
-/** Indicates that the key token was invalid when data was attempted to be fetched. */
-public class KeyTokenInvalidException extends RuntimeException {
-  public KeyTokenInvalidException(String key) {
-    super("Unable to fetch data due to token mismatch for key " + key);
-  }
-
-  /** Returns whether an exception was caused by a {@link KeyTokenInvalidException}. */
-  public static boolean isKeyTokenInvalidException(@Nullable Throwable t) {
-    while (t != null) {
-      if (t instanceof KeyTokenInvalidException) {
-        return true;
-      }
-      t = t.getCause();
-    }
-    return false;
-  }
-}
+/**
+ * Category tag for validation tests which use sideinputs in OnTimer and OnWindowExpiration. Tests
+ * tagged with {@link UsesSideInputsInTimer} should be run for runners which support sideinputs.
+ */
+@Internal
+public class UsesSideInputsInTimer {}
