@@ -188,12 +188,22 @@ class PubsubSink<T> extends Sink<WindowedValue<T>> {
     }
 
     @Override
-    public void close() throws IOException {
+    public void flush() throws IOException {
       Windmill.PubSubMessageBundle pubsubMessages = outputBuilder.build();
       if (pubsubMessages.getMessagesCount() > 0) {
         context.getOutputBuilder().addPubsubMessages(pubsubMessages);
       }
       outputBuilder.clear();
+      outputBuilder
+          .setTopic(topic)
+          .setTimestampLabel(timestampLabel)
+          .setIdLabel(idLabel)
+          .setWithAttributes(withAttributes);
+    }
+
+    @Override
+    public void close() throws IOException {
+      flush();
     }
 
     @Override

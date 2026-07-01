@@ -161,4 +161,104 @@ public class PubsubDynamicSinkTest {
             .build();
     assertEquals(expectedCommit, outputBuilder.build());
   }
+
+  @Test
+  public void testFlush() throws Exception {
+    Windmill.WorkItemCommitRequest.Builder builder1 =
+        Windmill.WorkItemCommitRequest.newBuilder()
+            .setKey(ByteString.copyFromUtf8("key1"))
+            .setWorkToken(1);
+    Windmill.WorkItemCommitRequest.Builder builder2 =
+        Windmill.WorkItemCommitRequest.newBuilder()
+            .setKey(ByteString.copyFromUtf8("key2"))
+            .setWorkToken(2);
+
+    when(mockContext.getOutputBuilder()).thenReturn(builder1, builder2);
+
+    Map<String, Object> spec = new HashMap<>();
+    spec.put(PropertyNames.OBJECT_TYPE_NAME, "PubsubDynamicSink");
+    spec.put(PropertyNames.PUBSUB_TIMESTAMP_ATTRIBUTE, "ts");
+    spec.put(PropertyNames.PUBSUB_ID_ATTRIBUTE, "id");
+
+    CloudObject cloudSinkSpec = CloudObject.fromSpec(spec);
+    PubsubDynamicSink sink =
+        (PubsubDynamicSink)
+            SinkRegistry.defaultRegistry()
+                .create(
+                    cloudSinkSpec,
+                    WindowedValues.getFullCoder(VoidCoder.of(), IntervalWindow.getCoder()),
+                    null,
+                    mockContext,
+                    null)
+                .getUnderlyingSink();
+
+    Sink.SinkWriter<WindowedValue<PubsubMessage>> writer = sink.writer();
+
+    byte[] payload1 = "value1".getBytes(StandardCharsets.UTF_8);
+    byte[] payload2 = "value2".getBytes(StandardCharsets.UTF_8);
+
+    // Write to builder1 (topic1)
+    writer.add(
+        WindowedValues.timestampedValueInGlobalWindow(
+            new PubsubMessage(payload1, null).withTopic("topic1"), new Instant(0)));
+    writer.flush();
+
+    Windmill.Message expectedMessage1 =
+        Windmill.Message.newBuilder()
+            .setTimestamp(0)
+            .setData(
+                Pubsub.PubsubMessage.newBuilder()
+                    .setData(ByteString.copyFrom(payload1))
+                    .build()
+                    .toByteString())
+            .build();
+
+    assertEquals(
+        Windmill.WorkItemCommitRequest.newBuilder()
+            .setKey(ByteString.copyFromUtf8("key1"))
+            .setWorkToken(1)
+            .addPubsubMessages(
+                Windmill.PubSubMessageBundle.newBuilder()
+                    .setTopic("topic1")
+                    .setTimestampLabel("ts")
+                    .setIdLabel("id")
+                    .setWithAttributes(true)
+                    .addMessages(expectedMessage1))
+            .build(),
+        builder1.build());
+
+    // Write to builder2 (topic1) - after flush, it should go to builder2
+    writer.add(
+        WindowedValues.timestampedValueInGlobalWindow(
+            new PubsubMessage(payload2, null).withTopic("topic1"), new Instant(1)));
+    writer.flush();
+
+    Windmill.Message expectedMessage2 =
+        Windmill.Message.newBuilder()
+            .setTimestamp(1000) // 1 * 1000
+            .setData(
+                Pubsub.PubsubMessage.newBuilder()
+                    .setData(ByteString.copyFrom(payload2))
+                    .build()
+                    .toByteString())
+            .build();
+
+    assertEquals(
+        Windmill.WorkItemCommitRequest.newBuilder()
+            .setKey(ByteString.copyFromUtf8("key2"))
+            .setWorkToken(2)
+            .addPubsubMessages(
+                Windmill.PubSubMessageBundle.newBuilder()
+                    .setTopic("topic1")
+                    .setTimestampLabel("ts")
+                    .setIdLabel("id")
+                    .setWithAttributes(true)
+                    .addMessages(expectedMessage2))
+            .build(),
+        builder2.build());
+
+    // Verify builder1 was not modified
+    assertEquals(1, builder1.getPubsubMessagesCount());
+    assertEquals(1, builder1.getPubsubMessages(0).getMessagesCount());
+  }
 }

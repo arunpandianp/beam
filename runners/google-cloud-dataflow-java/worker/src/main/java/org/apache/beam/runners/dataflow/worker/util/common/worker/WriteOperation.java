@@ -107,7 +107,11 @@ public class WriteOperation extends ReceivingOperation {
   }
 
   @Override
-  public void finishKey(@Nullable Object key) throws Exception {}
+  public void finishKey(@Nullable Object key) throws Exception {
+    if (writer != null) {
+      writer.flush();
+    }
+  }
 
   @Override
   public void abort() throws Exception {

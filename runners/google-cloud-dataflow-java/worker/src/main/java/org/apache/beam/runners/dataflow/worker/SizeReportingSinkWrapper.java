@@ -66,6 +66,11 @@ public class SizeReportingSinkWrapper<T> extends Sink<T> {
     }
 
     @Override
+    public void flush() throws IOException {
+      underlyingWriter.flush();
+    }
+
+    @Override
     public void close() throws IOException {
       underlyingWriter.close();
     }

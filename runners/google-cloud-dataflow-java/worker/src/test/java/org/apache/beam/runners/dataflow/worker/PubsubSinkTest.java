@@ -180,4 +180,81 @@ public class PubsubSinkTest {
         CoderException.class,
         () -> writer.add(WindowedValues.timestampedValueInGlobalWindow("e0", new Instant(0))));
   }
+
+  @Test
+  public void testFlush() throws Exception {
+    Windmill.WorkItemCommitRequest.Builder builder1 =
+        Windmill.WorkItemCommitRequest.newBuilder()
+            .setKey(ByteString.copyFromUtf8("key1"))
+            .setWorkToken(1);
+    Windmill.WorkItemCommitRequest.Builder builder2 =
+        Windmill.WorkItemCommitRequest.newBuilder()
+            .setKey(ByteString.copyFromUtf8("key2"))
+            .setWorkToken(2);
+
+    when(mockContext.getOutputBuilder()).thenReturn(builder1, builder2);
+
+    Map<String, Object> spec = new HashMap<>();
+    spec.put(PropertyNames.OBJECT_TYPE_NAME, "");
+    spec.put(PropertyNames.PUBSUB_TOPIC, "topic");
+    spec.put(PropertyNames.PUBSUB_TIMESTAMP_ATTRIBUTE, "ts");
+    spec.put(PropertyNames.PUBSUB_ID_ATTRIBUTE, "id");
+    CloudObject cloudSinkSpec = CloudObject.fromSpec(spec);
+    PubsubSink.Factory factory = new PubsubSink.Factory();
+    PubsubSink<String> sink =
+        (PubsubSink<String>)
+            factory.create(
+                cloudSinkSpec,
+                WindowedValues.getFullCoder(StringUtf8Coder.of(), IntervalWindow.getCoder()),
+                null,
+                mockContext,
+                null);
+
+    Sink.SinkWriter<WindowedValue<String>> writer = sink.writer();
+
+    // Write to builder1
+    writer.add(WindowedValues.timestampedValueInGlobalWindow("e0", new Instant(0)));
+    writer.flush();
+
+    assertEquals(
+        Windmill.WorkItemCommitRequest.newBuilder()
+            .setKey(ByteString.copyFromUtf8("key1"))
+            .setWorkToken(1)
+            .addPubsubMessages(
+                Windmill.PubSubMessageBundle.newBuilder()
+                    .setTopic("topic")
+                    .setTimestampLabel("ts")
+                    .setIdLabel("id")
+                    .addMessages(
+                        Windmill.Message.newBuilder()
+                            .setTimestamp(0)
+                            .setData(ByteString.copyFromUtf8("e0")))
+                    .setWithAttributes(false))
+            .build(),
+        builder1.build());
+
+    // Write to builder2 (after flush, mockContext.getOutputBuilder() should return builder2)
+    writer.add(WindowedValues.timestampedValueInGlobalWindow("e1", new Instant(1)));
+    writer.flush();
+
+    assertEquals(
+        Windmill.WorkItemCommitRequest.newBuilder()
+            .setKey(ByteString.copyFromUtf8("key2"))
+            .setWorkToken(2)
+            .addPubsubMessages(
+                Windmill.PubSubMessageBundle.newBuilder()
+                    .setTopic("topic")
+                    .setTimestampLabel("ts")
+                    .setIdLabel("id")
+                    .addMessages(
+                        Windmill.Message.newBuilder()
+                            .setTimestamp(1000)
+                            .setData(ByteString.copyFromUtf8("e1")))
+                    .setWithAttributes(false))
+            .build(),
+        builder2.build());
+
+    // Verify builder1 was not modified during second write
+    assertEquals(1, builder1.getPubsubMessagesCount());
+  }
 }

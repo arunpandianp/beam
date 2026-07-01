@@ -50,6 +50,9 @@ public abstract class Sink<T> {
      * <p>{@link #abort()} will not be called after a call to {@link #close()}.
      */
     public void abort() throws IOException;
+
+    /** Flushes any buffered data. */
+    default void flush() throws IOException {}
   }
 
   /** Returns whether this Sink can be restarted. */

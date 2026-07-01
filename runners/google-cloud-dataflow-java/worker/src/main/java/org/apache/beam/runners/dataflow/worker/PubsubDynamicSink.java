@@ -146,8 +146,13 @@ public class PubsubDynamicSink extends Sink<WindowedValue<PubsubMessage>> {
     }
 
     @Override
-    public void close() throws IOException {
+    public void flush() throws IOException {
       outputBuilders.clear();
+    }
+
+    @Override
+    public void close() throws IOException {
+      flush();
     }
 
     @Override

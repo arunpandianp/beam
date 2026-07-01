@@ -334,7 +334,7 @@ class WindmillSink<T> extends Sink<WindowedValue<T>> {
     }
 
     @Override
-    public void close() throws IOException {
+    public void flush() throws IOException {
       try {
         outputBuilder.setDestinationStreamId(destinationName);
 
@@ -348,6 +348,11 @@ class WindmillSink<T> extends Sink<WindowedValue<T>> {
         outputBuilder.clear();
       }
       productionMap.clear();
+    }
+
+    @Override
+    public void close() throws IOException {
+      flush();
     }
 
     @Override
