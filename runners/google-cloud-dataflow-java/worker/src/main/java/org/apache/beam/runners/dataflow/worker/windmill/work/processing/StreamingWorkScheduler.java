@@ -402,6 +402,7 @@ public class StreamingWorkScheduler {
       List<Windmill.WorkItemCommitRequest> workItemCommits) {
     Preconditions.checkState(!workBatch.isEmpty());
     Preconditions.checkState(workBatch.size() == workItemCommits.size());
+
     Windmill.MultiKeyWorkItemCommitRequest.Builder multiKeyBuilder =
         Windmill.MultiKeyWorkItemCommitRequest.newBuilder();
 
@@ -411,7 +412,6 @@ public class StreamingWorkScheduler {
         Windmill.Uint128Proto.newBuilder().setHigh(keyGroup.high()).setLow(keyGroup.low()).build());
 
     for (int i = 0; i < workBatch.size(); i++) {
-      // TODO: Retry on commit truncations
       Windmill.WorkItemCommitRequest commit = workItemCommits.get(i);
       Work w = workBatch.get(i);
       multiKeyBuilder.addRequests(
@@ -420,6 +420,8 @@ public class StreamingWorkScheduler {
               .addAllPerWorkItemLatencyAttributions(w.getLatencyAttributions(sampler))
               .build());
     }
+
+    Windmill.MultiKeyWorkItemCommitRequest multiKeyCommitRequest = multiKeyBuilder.build();
 
     // Transition states of all completed works in the batch to COMMIT_QUEUED and submit
     for (Work w : workBatch) {
@@ -431,7 +433,7 @@ public class StreamingWorkScheduler {
         .workCommitter()
         .accept(
             Commit.createMultiKey(
-                multiKeyBuilder.build(), computationState, ImmutableList.copyOf(workBatch)));
+                multiKeyCommitRequest, computationState, ImmutableList.copyOf(workBatch)));
   }
 
   private void commitSingleKeyWork(
@@ -525,5 +527,11 @@ public class StreamingWorkScheduler {
     abstract Map<Long, Pair<Instant, Runnable>> finalizationCallbacks();
 
     abstract long stateBytesRead();
+  }
+
+  public static class MultiKeyCommitValidationException extends RuntimeException {
+    public MultiKeyCommitValidationException(String message) {
+      super(message);
+    }
   }
 }
