@@ -207,6 +207,18 @@ public interface DataflowPipelineDebugOptions
   void setWorkerCacheMb(Integer value);
 
   /**
+   * The size of the worker's small in-memory cache, in megabytes.
+   *
+   * <p>Currently, this cache is used for storing read values of small user state entries for
+   * streaming jobs.
+   */
+  @Description("The size of the worker's small in-memory cache, in megabytes.")
+  @Default.Integer(100)
+  Integer getSmallWorkerCacheMb();
+
+  void setSmallWorkerCacheMb(Integer value);
+
+  /**
    * The amount of time before UnboundedReaders are considered idle and closed during streaming
    * execution.
    */

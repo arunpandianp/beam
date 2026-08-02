@@ -1018,6 +1018,8 @@ message UserWorkerRunnerV1Settings {
 
   optional int64 max_cached_entry_bytes = 5 [default = -1];
 
+  optional int64 small_max_cached_entry_bytes = 6 [default = -1];
+
   reserved 1, 2;
 }
 

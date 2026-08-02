@@ -18,6 +18,8 @@
 package org.apache.beam.runners.dataflow.worker.windmill.state;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 
 import java.io.Closeable;
@@ -309,6 +311,126 @@ public class WindmillStateCacheTest {
     keyCache =
         cache.forComputation(COMPUTATION).forKey(COMPUTATION_KEY, 0L, 4L).forFamily(STATE_FAMILY);
     assertEquals(Optional.empty(), getFromCache(keyCache, StateNamespaces.global(), tag2));
+  }
+
+  @Test
+  public void testSmallWorkerCache() throws Exception {
+    cache.setSmallMaxCachedEntryBytesOverride(200); // Small threshold: 200 bytes
+    cache.setMaxCachedEntryBytesOverride(1000); // Regular threshold: 1000 bytes
+
+    WindmillComputationKey key1 = computationKey(COMPUTATION, "key1", 1L);
+    WindmillStateCache.ForKeyAndFamily keyCache1 =
+        cache.forComputation(COMPUTATION).forKey(key1, 0L, 1L).forFamily(STATE_FAMILY);
+    TestStateTag tagSmall = new TestStateTag("tagSmall");
+    putInCache(keyCache1, StateNamespaces.global(), tagSmall, new TestState("small_val"), 10);
+    keyCache1.persist();
+
+    // Verify small entry went to smallWorkerCache and not main cache
+    assertTrue(
+        cache.isPresentInSmallWorkerCache(
+            keyCache1.forKey, STATE_FAMILY, StateNamespaces.global()));
+    assertFalse(
+        cache.isPresentInMainWorkerCache(keyCache1.forKey, STATE_FAMILY, StateNamespaces.global()));
+
+    // Token 2L: put normal entry (> 200 and <= 1000)
+    WindmillComputationKey key2 = computationKey(COMPUTATION, "key2", 2L);
+    WindmillStateCache.ForKeyAndFamily keyCache2 =
+        cache.forComputation(COMPUTATION).forKey(key2, 0L, 2L).forFamily(STATE_FAMILY);
+    TestStateTag tagNormal = new TestStateTag("tagNormal");
+    putInCache(keyCache2, StateNamespaces.global(), tagNormal, new TestState("normal_val"), 300);
+    keyCache2.persist();
+
+    assertFalse(
+        cache.isPresentInSmallWorkerCache(
+            keyCache2.forKey, STATE_FAMILY, StateNamespaces.global()));
+    assertTrue(
+        cache.isPresentInMainWorkerCache(keyCache2.forKey, STATE_FAMILY, StateNamespaces.global()));
+
+    // Token 3L: put too large entry (> 1000)
+    WindmillComputationKey key3 = computationKey(COMPUTATION, "key3", 3L);
+    WindmillStateCache.ForKeyAndFamily keyCache3 =
+        cache.forComputation(COMPUTATION).forKey(key3, 0L, 3L).forFamily(STATE_FAMILY);
+    TestStateTag tagTooLarge = new TestStateTag("tagTooLarge");
+    putInCache(
+        keyCache3, StateNamespaces.global(), tagTooLarge, new TestState("toolarge_val"), 2000);
+    keyCache3.persist();
+
+    assertFalse(
+        cache.isPresentInSmallWorkerCache(
+            keyCache3.forKey, STATE_FAMILY, StateNamespaces.global()));
+    assertFalse(
+        cache.isPresentInMainWorkerCache(keyCache3.forKey, STATE_FAMILY, StateNamespaces.global()));
+
+    // Token 4L: put small entry and then update to large -> migrates small to main
+    WindmillComputationKey key4 = computationKey(COMPUTATION, "key4", 4L);
+    WindmillStateCache.ForKeyAndFamily keyCache4 =
+        cache.forComputation(COMPUTATION).forKey(key4, 0L, 4L).forFamily(STATE_FAMILY);
+    putInCache(keyCache4, StateNamespaces.global(), tagSmall, new TestState("val1"), 10);
+    keyCache4.persist();
+    assertTrue(
+        cache.isPresentInSmallWorkerCache(
+            keyCache4.forKey, STATE_FAMILY, StateNamespaces.global()));
+
+    putInCache(keyCache4, StateNamespaces.global(), tagSmall, new TestState("val1_large"), 500);
+    keyCache4.persist();
+    assertFalse(
+        cache.isPresentInSmallWorkerCache(
+            keyCache4.forKey, STATE_FAMILY, StateNamespaces.global()));
+    assertTrue(
+        cache.isPresentInMainWorkerCache(keyCache4.forKey, STATE_FAMILY, StateNamespaces.global()));
+
+    // Token 5L: put large entry and then update to small -> migrates main to small
+    WindmillComputationKey key5 = computationKey(COMPUTATION, "key5", 5L);
+    WindmillStateCache.ForKeyAndFamily keyCache5 =
+        cache.forComputation(COMPUTATION).forKey(key5, 0L, 5L).forFamily(STATE_FAMILY);
+    putInCache(keyCache5, StateNamespaces.global(), tagNormal, new TestState("val2_large"), 500);
+    keyCache5.persist();
+    assertTrue(
+        cache.isPresentInMainWorkerCache(keyCache5.forKey, STATE_FAMILY, StateNamespaces.global()));
+
+    putInCache(keyCache5, StateNamespaces.global(), tagNormal, new TestState("val2_small"), 10);
+    keyCache5.persist();
+    assertTrue(
+        cache.isPresentInSmallWorkerCache(
+            keyCache5.forKey, STATE_FAMILY, StateNamespaces.global()));
+    assertFalse(
+        cache.isPresentInMainWorkerCache(keyCache5.forKey, STATE_FAMILY, StateNamespaces.global()));
+  }
+
+  @Test
+  public void testSmallWorkerCacheDisabled() throws Exception {
+    WindmillStateCache disabledSmallCache =
+        WindmillStateCache.builder()
+            .setSizeMb(400)
+            .setSmallSizeMb(0) // 0 MB disables smallWorkerCache
+            .build();
+    disabledSmallCache.setSmallMaxCachedEntryBytesOverride(200);
+    disabledSmallCache.setMaxCachedEntryBytesOverride(1000);
+
+    WindmillComputationKey key1 = computationKey(COMPUTATION, "key1", 1L);
+    WindmillStateCache.ForKeyAndFamily keyCache1 =
+        disabledSmallCache.forComputation(COMPUTATION).forKey(key1, 0L, 1L).forFamily(STATE_FAMILY);
+    TestStateTag tagSmall1 = new TestStateTag("tagSmall1");
+    putInCache(keyCache1, StateNamespaces.global(), tagSmall1, new TestState("val1"), 10);
+    keyCache1.persist();
+
+    // With small cache disabled (smallSizeMb = 0), entry should go to mainWorkerCache
+    assertFalse(
+        disabledSmallCache.isPresentInSmallWorkerCache(
+            keyCache1.forKey, STATE_FAMILY, StateNamespaces.global()));
+    assertTrue(
+        disabledSmallCache.isPresentInMainWorkerCache(
+            keyCache1.forKey, STATE_FAMILY, StateNamespaces.global()));
+  }
+
+  @Test
+  public void testSummaryHtmlWithSmallCache() throws Exception {
+    WindmillStateCache c = WindmillStateCache.builder().setSizeMb(400).setSmallSizeMb(100).build();
+    java.io.StringWriter writer = new java.io.StringWriter();
+    c.appendSummaryHtml(new java.io.PrintWriter(writer));
+    String summary = writer.toString();
+
+    assertTrue(summary.contains("small:"));
   }
 
   @Test

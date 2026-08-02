@@ -638,8 +638,10 @@ public final class StreamingDataflowWorker {
     WindmillStateCache windmillStateCache =
         WindmillStateCache.builder()
             .setSizeMb(options.getWorkerCacheMb())
+            .setSmallSizeMb(options.getSmallWorkerCacheMb())
             .setSupportMapViaMultimap(options.isEnableStreamingEngine())
             .setMaxCachedEntryBytes(options.getMaxWindmillStateCacheEntryBytes())
+            .setSmallMaxCachedEntryBytes(options.getSmallMaxWindmillStateCacheEntryBytes())
             .setEnableHistogram(
                 !ExperimentalOptions.hasExperiment(
                     options, "disable_windmill_user_state_cache_histogram"))
@@ -668,6 +670,8 @@ public final class StreamingDataflowWorker {
             config -> {
               windmillStateCache.setMaxCachedEntryBytesOverride(
                   config.userWorkerJobSettings().getMaxCachedEntryBytes());
+              windmillStateCache.setSmallMaxCachedEntryBytesOverride(
+                  config.userWorkerJobSettings().getSmallMaxCachedEntryBytes());
             });
 
     ComputationStateCache computationStateCache =
@@ -889,7 +893,10 @@ public final class StreamingDataflowWorker {
     WindmillStateCache stateCache =
         WindmillStateCache.builder()
             .setSizeMb(options.getWorkerCacheMb())
+            .setSmallSizeMb(options.getSmallWorkerCacheMb())
             .setSupportMapViaMultimap(options.isEnableStreamingEngine())
+            .setMaxCachedEntryBytes(options.getMaxWindmillStateCacheEntryBytes())
+            .setSmallMaxCachedEntryBytes(options.getSmallMaxWindmillStateCacheEntryBytes())
             .build();
     ComputationConfig.Fetcher configFetcher =
         options.isEnableStreamingEngine()
@@ -910,6 +917,10 @@ public final class StreamingDataflowWorker {
                 return;
               }
               windmillServer.setWindmillServiceEndpoints(config.windmillServiceEndpoints());
+              stateCache.setMaxCachedEntryBytesOverride(
+                  config.userWorkerJobSettings().getMaxCachedEntryBytes());
+              stateCache.setSmallMaxCachedEntryBytesOverride(
+                  config.userWorkerJobSettings().getSmallMaxCachedEntryBytes());
             });
     ConcurrentMap<String, String> stateNameMap =
         new ConcurrentHashMap<>(prePopulatedStateNameMappings);

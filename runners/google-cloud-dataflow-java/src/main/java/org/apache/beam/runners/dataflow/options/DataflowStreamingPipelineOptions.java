@@ -267,6 +267,16 @@ public interface DataflowStreamingPipelineOptions extends PipelineOptions {
   void setMaxWindmillStateCacheEntryBytes(Long value);
 
   /**
+   * The maximum size of small cached entries in bytes. Entries (eg: values, bags) smaller than or
+   * equal to this limit will be cached by the small windmill state cache.
+   */
+  @Description("The maximum size of small cached entries in bytes.")
+  @Default.Long(0)
+  Long getSmallMaxWindmillStateCacheEntryBytes();
+
+  void setSmallMaxWindmillStateCacheEntryBytes(Long value);
+
+  /**
    * Factory for creating local Windmill address. Reads from system propery 'windmill.hostport' for
    * backwards compatibility.
    */
